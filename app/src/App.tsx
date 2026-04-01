@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import { invoke } from '@tauri-apps/api/tauri';
+import { invoke } from '@tauri-apps/api/core';
 import ExportOptions from './components/ExportOptions';
 import { COLUMNS_SIMPLE, COLUMNS_COMPLET } from './columns';
 
@@ -97,8 +97,8 @@ export default function App() {
                   <polyline points="17 8 12 3 7 8" />
                   <line x1="12" y1="3" x2="12" y2="15" />
                 </svg>
-                <p>Glisser-d&eacute;poser des fichiers PDF ici</p>
-                <p className="hint-sub">Plusieurs fichiers accept&eacute;s</p>
+                <p>Glisser-deposer des fichiers PDF ici</p>
+                <p className="hint-sub">Plusieurs fichiers acceptes</p>
               </div>
             ) : (
               <div className="file-list">
@@ -142,7 +142,7 @@ export default function App() {
               className={`mode-btn ${mode === 'precis' ? 'active' : ''}`}
               onClick={() => setMode('precis')}
             >
-              Pr&eacute;cis
+              Precis
             </button>
           </div>
 
@@ -169,12 +169,11 @@ export default function App() {
           >
             {processing ? 'Traitement...' : 'START'}
           </button>
-
           <button
             className="export-btn"
             onClick={() => setShowExport(true)}
           >
-            Options d'export &rsaquo;&rsaquo;
+            Options d'export ››
           </button>
         </div>
       </div>
