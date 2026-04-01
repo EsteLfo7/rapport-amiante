@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "identifier": "main-capability",
+  "description": "Main app capability with drag & drop and file dialog permissions",
+  "windows": ["main"],
+  "permissions": [
+    "core:window:default",
+    "core:event:default",
+    "core:window:allow-start-dragging",
+    "dialog:allow-open"
+  ]
+}

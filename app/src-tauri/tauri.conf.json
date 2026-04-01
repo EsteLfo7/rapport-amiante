@@ -1,7 +1,7 @@
 {
   "productName": "rapport-amiante",
   "version": "0.1.0",
-  "identifier": "com.rapport-amiante.app",
+  "identifier": "com.rapport-amiante.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
@@ -9,20 +9,22 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "title": "Rapport Amiante",
-        "width": 900,
-        "height": 620,
-        "minWidth": 720,
-        "minHeight": 480,
-        "resizable": true,
-        "fullscreen": false
-      }
-    ],
-    "security": {
-      "csp": null
+  "windows": [
+    {
+      "title": "Rapport Amiante",
+      "width": 900,
+      "height": 620,
+      "minWidth": 720,
+      "minHeight": 480,
+      "resizable": true,
+      "fullscreen": false,
+      "dragDropEnabled": true
+
     }
+  ],
+  "security": {
+    "csp": null
+  }
   },
   "bundle": {
     "active": true,
@@ -36,9 +38,6 @@
     ]
   },
   "plugins": {
-    "shell": {
-      "open": true
-    },
-    "dialog": {}
+    "shell": { "open": true }
   }
 }

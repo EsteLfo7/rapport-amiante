@@ -1,5 +1,7 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { open } from '@tauri-apps/plugin-dialog';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import ExportOptions from './components/ExportOptions';
 import { COLUMNS_SIMPLE, COLUMNS_COMPLET } from './columns';
 
@@ -20,33 +22,65 @@ export default function App() {
   const [processing, setProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState('');
-  const dropRef = useRef<HTMLDivElement>(null);
+  const [dragOver, setDragOver] = useState(false);
 
-  const handleDrop = useCallback(async (e: React.DragEvent) => {
-    e.preventDefault();
-    const dropped = Array.from(e.dataTransfer.files).filter(f =>
-      f.name.toLowerCase().endsWith('.pdf')
-    );
-    const newFiles: FileInfo[] = dropped.map(f => ({
-      path: (f as any).path || f.name,
-      name: f.name,
-      lines: 1,
-    }));
+  const addFiles = useCallback((newPaths: string[]) => {
+    const pdfs = newPaths.filter(p => p.toLowerCase().endsWith('.pdf'));
+    if (pdfs.length === 0) {
+      setStatus('Seuls les fichiers PDF sont acceptés.');
+      return;
+    }
+    setStatus('');
     setFiles(prev => {
-      const all = [...prev, ...newFiles];
-      setTotalLines(all.reduce((s, f) => s + f.lines, 0));
+      const existing = new Set(prev.map(f => f.path));
+      const filtered = pdfs
+        .filter(p => !existing.has(p))
+        .map(p => ({
+          path: p,
+          name: p.split('/').pop() || p.split('\\').pop() || p,
+          lines: 1,
+        }));
+      const all = [...prev, ...filtered];
+      setTotalLines(all.length);
       return all;
     });
   }, []);
 
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
+  // Écoute les événements drag & drop natifs de Tauri v2
+  useEffect(() => {
+    const win = getCurrentWindow();
+    let unlisten: (() => void) | undefined;
+
+    win.onDragDropEvent((event) => {
+      if (event.payload.type === 'over') {
+        setDragOver(true);
+      } else if (event.payload.type === 'drop') {
+        setDragOver(false);
+        const paths = event.payload.paths as string[];
+        addFiles(paths);
+      } else {
+        setDragOver(false);
+      }
+    }).then(fn => { unlisten = fn; });
+
+    return () => { unlisten?.(); };
+  }, [addFiles]);
+
+  // Ouvre le Finder via plugin-dialog
+  const handleClick = async () => {
+    const selected = await open({
+      multiple: true,
+      filters: [{ name: 'PDF', extensions: ['pdf'] }],
+    });
+    if (!selected) return;
+    const paths = Array.isArray(selected) ? selected : [selected];
+    addFiles(paths);
   };
 
   const removeFile = (idx: number) => {
     setFiles(prev => {
       const updated = prev.filter((_, i) => i !== idx);
-      setTotalLines(updated.reduce((s, f) => s + f.lines, 0));
+      setTotalLines(updated.length);
       return updated;
     });
   };
@@ -74,21 +108,19 @@ export default function App() {
 
   return (
     <div className="app">
-      {/* Header */}
       <header className="app-header">
         <h1>Rapport Amiante</h1>
         <span className="subtitle">Traitement de rapports PDF</span>
       </header>
 
       <div className="app-body">
-        {/* Left panel */}
         <div className="left-panel">
+
           {/* Drop zone */}
           <div
-            ref={dropRef}
-            className={`drop-zone ${files.length > 0 ? 'has-files' : ''}`}
-            onDrop={handleDrop}
-            onDragOver={handleDragOver}
+            className={`drop-zone ${files.length > 0 ? 'has-files' : ''} ${dragOver ? 'drag-over' : ''}`}
+            onClick={files.length === 0 ? handleClick : undefined}
+            style={{ cursor: files.length === 0 ? 'pointer' : 'default' }}
           >
             {files.length === 0 ? (
               <div className="drop-hint">
@@ -97,8 +129,8 @@ export default function App() {
                   <polyline points="17 8 12 3 7 8" />
                   <line x1="12" y1="3" x2="12" y2="15" />
                 </svg>
-                <p>Glisser-deposer des fichiers PDF ici</p>
-                <p className="hint-sub">Plusieurs fichiers acceptes</p>
+                <p>Glisser-déposer des fichiers PDF ici</p>
+                <p className="hint-sub">ou <strong>cliquer</strong> pour ouvrir le Finder</p>
               </div>
             ) : (
               <div className="file-list">
@@ -109,13 +141,15 @@ export default function App() {
                       <polyline points="14 2 14 8 20 8" />
                     </svg>
                     <span className="file-name">{f.name}</span>
-                    <button className="remove-btn" onClick={() => removeFile(i)}>x</button>
+                    <button
+                      className="remove-btn"
+                      onClick={e => { e.stopPropagation(); removeFile(i); }}
+                    >✕</button>
                   </div>
                 ))}
                 <div
                   className="add-more"
-                  onDrop={handleDrop}
-                  onDragOver={handleDragOver}
+                  onClick={e => { e.stopPropagation(); handleClick(); }}
                 >
                   + Ajouter d'autres fichiers PDF
                 </div>
@@ -127,7 +161,7 @@ export default function App() {
           <div className="stats-bar">
             <span><strong>{files.length}</strong> fichier{files.length !== 1 ? 's' : ''}</span>
             <span className="sep">|</span>
-            <span><strong>{totalLines}</strong> ligne{totalLines !== 1 ? 's' : ''} au total</span>
+            <span><strong>{totalLines}</strong> PDF{totalLines !== 1 ? 's' : ''} au total</span>
           </div>
 
           {/* Mode selector */}
@@ -135,15 +169,11 @@ export default function App() {
             <button
               className={`mode-btn ${mode === 'rapide' ? 'active' : ''}`}
               onClick={() => setMode('rapide')}
-            >
-              Rapide
-            </button>
+            >Rapide</button>
             <button
               className={`mode-btn ${mode === 'precis' ? 'active' : ''}`}
               onClick={() => setMode('precis')}
-            >
-              Precis
-            </button>
+            >Précis</button>
           </div>
 
           {/* Status */}
@@ -169,16 +199,13 @@ export default function App() {
           >
             {processing ? 'Traitement...' : 'START'}
           </button>
-          <button
-            className="export-btn"
-            onClick={() => setShowExport(true)}
-          >
+          <button className="export-btn" onClick={() => setShowExport(true)}>
             Options d'export ››
           </button>
         </div>
       </div>
+      
 
-      {/* Export Options Modal */}
       {showExport && (
         <ExportOptions
           columns={columns}
