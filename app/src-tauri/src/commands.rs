@@ -29,8 +29,8 @@ pub fn process_files(
     }
 
     // Chemin vers le script Python principal
-    // En production: relatif a l'executable .exe
-    // En dev: relatif au workspace
+    // En dev: depuis app/src-tauri, remonter de 2 niveaux pour atteindre rapport_amiante/
+    // En production (exe bundled): a cote de l'executable
     let script = find_python_script();
 
     // Colonnes separees par virgule
@@ -72,12 +72,31 @@ pub fn process_files(
 }
 
 /// Trouve le chemin du script Python
+/// Structure: repo/app/src-tauri/src/ -> remonter 3 niveaux -> repo/rapport_amiante/main.py
 fn find_python_script() -> String {
-    // En dev: depuis la racine du projet
-    let dev_path = "../rapport_amiante/main.py";
+    // En dev: depuis la racine du workspace (cargo run dans app/src-tauri)
+    let dev_path = "../../rapport_amiante/main.py";
     if std::path::Path::new(dev_path).exists() {
         return dev_path.to_string();
     }
+
+    // Depuis le repertoire courant
+    if let Ok(cwd) = std::env::current_dir() {
+        // Remonter jusqu'a trouver rapport_amiante/
+        let mut dir = cwd.clone();
+        for _ in 0..5 {
+            let candidate = dir.join("rapport_amiante").join("main.py");
+            if candidate.exists() {
+                return candidate.to_string_lossy().to_string();
+            }
+            if let Some(parent) = dir.parent() {
+                dir = parent.to_path_buf();
+            } else {
+                break;
+            }
+        }
+    }
+
     // En production (exe bundled): a cote de l'executable
     if let Ok(exe_dir) = std::env::current_exe() {
         if let Some(dir) = exe_dir.parent() {
@@ -87,6 +106,7 @@ fn find_python_script() -> String {
             }
         }
     }
+
     // Fallback
     "main.py".to_string()
 }
