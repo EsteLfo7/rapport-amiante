@@ -1,5 +1,6 @@
-MODEL = "gemini-2.5-pro"
-RAG_POSTPROCESS_MODEL = "gemini-2.5-flash-lite"
+# MODEL = "gemini-2.5-pro"
+MODEL = "gemini-2.5-flash"
+RAG_POSTPROCESS_MODEL = "gemini-2.5-flash"
 
 MODE_GEMINI = "gemini"
 MODE_RAG = "rag"

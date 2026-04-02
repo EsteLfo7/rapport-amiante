@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import DetailPage from './components/DetailPage';
 import ExportOptions from './components/ExportOptions';
-import ResultModal from './components/ResultModal';
+import RetouchPage from './components/RetouchPage';
 import { ColumnDefinition, SIMPLE_COLUMNS, cloneColumn } from './columns';
+import { BackendResponse, PendingRetouch, ProcessingProgress, ProcessingState } from './types';
 
 export type ProcessingMode = 'rapide' | 'precis';
 
@@ -14,46 +16,12 @@ export interface FileInfo {
   name: string;
 }
 
-export interface BackendResponse {
-  success: boolean;
-  message: string;
-  output_path: string | null;
-  output_dir: string | null;
-  manifest_path: string | null;
-  log_path: string | null;
-  processed_count: number;
-  error_count: number;
-  duration_seconds: number;
-  error_details: string[];
-  columns: ColumnDefinition[];
-}
+type PageView = 'home' | 'detail' | 'retouches';
 
-export interface ProcessingProgress {
-  stage: string;
-  message: string;
-  total_files: number;
-  current_file_index: number;
-  processed_count: number;
-  error_count: number;
-  file_name: string | null;
-  error_detail: string | null;
-}
-
-interface ProgressHistoryEntry extends ProcessingProgress {
-  id: number;
-  timestamp: number;
-}
-
-interface ProcessingState {
-  startedAt: number;
-  current: ProcessingProgress;
-  history: ProgressHistoryEntry[];
-}
-
-function buildInitialProgress(): ProcessingProgress {
+function buildInitialProgress(message: string): ProcessingProgress {
   return {
     stage: 'starting',
-    message: 'Préparation du traitement...',
+    message,
     total_files: 0,
     current_file_index: 0,
     processed_count: 0,
@@ -63,18 +31,19 @@ function buildInitialProgress(): ProcessingProgress {
   };
 }
 
-function appendHistory(
-  previous: ProgressHistoryEntry[],
-  payload: ProcessingProgress,
-): ProgressHistoryEntry[] {
-  const nextEntry: ProgressHistoryEntry = {
+function appendHistory(previous: ProcessingState | null, payload: ProcessingProgress): ProcessingState {
+  const entry = {
     ...payload,
     id: Date.now() + Math.floor(Math.random() * 1000),
     timestamp: Date.now(),
   };
 
-  const nextHistory = [...previous, nextEntry];
-  return nextHistory.slice(-12);
+  return {
+    startedAt: previous?.startedAt ?? Date.now(),
+    stoppedAt: previous?.stoppedAt ?? null,
+    current: payload,
+    history: [...(previous?.history ?? []), entry].slice(-20),
+  };
 }
 
 function computeProgressValue(payload: ProcessingProgress): number {
@@ -83,7 +52,7 @@ function computeProgressValue(payload: ProcessingProgress): number {
   }
 
   if (payload.total_files === 0) {
-    return 10;
+    return 12;
   }
 
   const stageRatioByName: Record<string, number> = {
@@ -95,13 +64,15 @@ function computeProgressValue(payload: ProcessingProgress): number {
     fallback_rag: 0.35,
     file_done: 1,
     file_error: 1,
+    done: 1,
+    failed: 1,
   };
 
   const fileProgressRatio = stageRatioByName[payload.stage] ?? 0.5;
   const completedFiles = Math.max(payload.current_file_index - 1, 0);
   const fileWeight = 78 / payload.total_files;
 
-  return Math.min(98, Math.round(10 + completedFiles * fileWeight + fileWeight * fileProgressRatio));
+  return Math.min(100, Math.round(10 + completedFiles * fileWeight + fileWeight * fileProgressRatio));
 }
 
 function buildFailureResponse(message: string): BackendResponse {
@@ -115,25 +86,72 @@ function buildFailureResponse(message: string): BackendResponse {
     processed_count: 0,
     error_count: 0,
     duration_seconds: 0,
-    error_details: [],
+    error_details: [message],
     columns: [],
   };
+}
+
+function buildPendingRetouch(outputPath: string, manifestPath: string, columns: ColumnDefinition[]): PendingRetouch {
+  return {
+    outputPath,
+    manifestPath,
+    columns: columns.map(cloneColumn),
+  };
+}
+
+function confirmResetAfterFinishedTreatment(): boolean {
+  return window.confirm(
+    'Revenir à l’accueil supprimera le contexte courant et toute retouche sera impossible après confirmation. Continuer ?',
+  );
 }
 
 export default function App() {
   const [files, setFiles] = useState<FileInfo[]>([]);
   const [mode, setMode] = useState<ProcessingMode>('rapide');
   const [columns, setColumns] = useState<ColumnDefinition[]>(() => SIMPLE_COLUMNS.map(cloneColumn));
+  const [pageView, setPageView] = useState<PageView>('home');
   const [showExport, setShowExport] = useState(false);
-  const [showResult, setShowResult] = useState(false);
   const [processing, setProcessing] = useState(false);
-  const [savingEdits, setSavingEdits] = useState(false);
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState('');
   const [statusTone, setStatusTone] = useState<'processing' | 'success' | 'error'>('success');
   const [dragOver, setDragOver] = useState(false);
   const [result, setResult] = useState<BackendResponse | null>(null);
   const [processingState, setProcessingState] = useState<ProcessingState | null>(null);
+  const [pendingRetouch, setPendingRetouch] = useState<PendingRetouch | null>(null);
+  const [homeElapsedSeconds, setHomeElapsedSeconds] = useState(0);
+
+  const resetToHomeBase = useCallback(() => {
+    setFiles([]);
+    setMode('rapide');
+    setColumns(SIMPLE_COLUMNS.map(cloneColumn));
+    setPageView('home');
+    setShowExport(false);
+    setProcessing(false);
+    setProgress(0);
+    setStatus('');
+    setStatusTone('success');
+    setDragOver(false);
+    setResult(null);
+    setProcessingState(null);
+    setPendingRetouch(null);
+    setHomeElapsedSeconds(0);
+  }, []);
+
+  const handleHomeNavigation = useCallback(() => {
+    if (processing) {
+      setPageView('home');
+      return;
+    }
+
+    if (result || pendingRetouch) {
+      if (!confirmResetAfterFinishedTreatment()) {
+        return;
+      }
+    }
+
+    resetToHomeBase();
+  }, [pendingRetouch, processing, resetToHomeBase, result]);
 
   const addFiles = useCallback((newPaths: string[]) => {
     const pdfs = newPaths.filter((path) => path.toLowerCase().endsWith('.pdf'));
@@ -189,12 +207,7 @@ export default function App() {
     void listen<ProcessingProgress>('processing-progress', (event) => {
       const payload = event.payload;
 
-      setProcessingState((previous) => {
-        const startedAt = previous?.startedAt ?? Date.now();
-        const history = appendHistory(previous?.history ?? [], payload);
-        return { startedAt, current: payload, history };
-      });
-
+      setProcessingState((previous) => appendHistory(previous, payload));
       setStatus(payload.message);
       setStatusTone(payload.error_detail ? 'error' : 'processing');
       setProgress(computeProgressValue(payload));
@@ -206,6 +219,27 @@ export default function App() {
       unlisten?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (!processingState) {
+      setHomeElapsedSeconds(0);
+      return;
+    }
+
+    const computeSeconds = () => {
+      const endTimestamp = processingState.stoppedAt ?? Date.now();
+      setHomeElapsedSeconds(Math.max(0, Math.floor((endTimestamp - processingState.startedAt) / 1000)));
+    };
+
+    computeSeconds();
+
+    if (processingState.stoppedAt !== null) {
+      return;
+    }
+
+    const intervalId = window.setInterval(computeSeconds, 1000);
+    return () => window.clearInterval(intervalId);
+  }, [processingState]);
 
   const handleOpenPicker = async () => {
     const selected = await openDialog({
@@ -232,180 +266,146 @@ export default function App() {
     await invoke('open_export_target', { path, revealInFinder });
   };
 
-  const handleStart = async () => {
-    if (files.length === 0 || columns.length === 0) {
-      return;
-    }
+  const finalizeProcessingState = (response: BackendResponse, failedMessage?: string) => {
+    setProcessingState((previous) => {
+      if (!previous) {
+        return previous;
+      }
 
-    const initialProgress = buildInitialProgress();
+      const message = failedMessage ?? response.message;
+      const nextPayload: ProcessingProgress = {
+        ...previous.current,
+        stage: failedMessage ? 'failed' : response.success ? 'done' : 'failed',
+        message,
+        processed_count: response.processed_count,
+        error_count: response.error_count,
+        error_detail: response.error_details[0] ?? failedMessage ?? null,
+      };
+
+      return {
+        ...appendHistory(previous, nextPayload),
+        startedAt: previous.startedAt,
+        stoppedAt: Date.now(),
+      };
+    });
+  };
+
+  const launchProcess = async () => {
+    const isRetouch = !!pendingRetouch;
+    const initialMessage = isRetouch ? 'Préparation de la retouche...' : 'Préparation du traitement...';
 
     setProcessing(true);
     setProgress(5);
-    setStatus(initialProgress.message);
+    setStatus(initialMessage);
     setStatusTone('processing');
-    setShowResult(true);
-    setResult(null);
-    setProcessingState({
-      startedAt: Date.now(),
-      current: initialProgress,
-      history: appendHistory([], initialProgress),
-    });
+    setProcessingState(appendHistory(null, buildInitialProgress(initialMessage)));
 
     try {
-      const response = await invoke<BackendResponse>('process_files', {
-        paths: files.map((file) => file.path),
-        mode,
-        columns,
-      });
+      const response = isRetouch
+        ? await invoke<BackendResponse>('update_export', {
+            outputPath: pendingRetouch.outputPath,
+            manifestPath: pendingRetouch.manifestPath,
+            columns: pendingRetouch.columns,
+          })
+        : await invoke<BackendResponse>('process_files', {
+            paths: files.map((file) => file.path),
+            mode,
+            columns,
+          });
 
       setResult(response);
+      setColumns(response.columns.map(cloneColumn));
       setStatus(response.message);
       setStatusTone(response.success ? 'success' : 'error');
       setProgress(100);
-      setProcessingState((previous) =>
-        previous
-          ? {
-              ...previous,
-              current: {
-                ...previous.current,
-                stage: response.success ? 'done' : 'failed',
-                message: response.message,
-                processed_count: response.processed_count,
-                error_count: response.error_count,
-              },
-              history: appendHistory(previous.history, {
-                ...previous.current,
-                stage: response.success ? 'done' : 'failed',
-                message: response.message,
-                processed_count: response.processed_count,
-                error_count: response.error_count,
-                error_detail: response.error_details[0] ?? null,
-              }),
-            }
-          : previous,
-      );
+      finalizeProcessingState(response);
+
+      if (response.success) {
+        setPendingRetouch(null);
+      }
     } catch (error) {
       const message = `Erreur: ${String(error)}`;
-      setResult(buildFailureResponse(message));
+      const failureResponse = buildFailureResponse(message);
+
+      setResult(failureResponse);
       setStatus(message);
       setStatusTone('error');
       setProgress(0);
-      setProcessingState((previous) =>
-        previous
-          ? {
-              ...previous,
-              current: {
-                ...previous.current,
-                stage: 'failed',
-                message,
-                error_detail: message,
-              },
-              history: appendHistory(previous.history, {
-                ...previous.current,
-                stage: 'failed',
-                message,
-                error_detail: message,
-              }),
-            }
-          : previous,
-      );
+      finalizeProcessingState(failureResponse, message);
     } finally {
       setProcessing(false);
     }
   };
 
-  const handleSaveEdits = async (updatedColumns: ColumnDefinition[]) => {
+  const handleStart = async () => {
+    if (!pendingRetouch && (files.length === 0 || columns.length === 0)) {
+      return;
+    }
+
+    await launchProcess();
+  };
+
+  const handleSaveRetouchPlan = (updatedColumns: ColumnDefinition[]) => {
     if (!result?.output_path || !result.manifest_path) {
       return;
     }
 
-    const initialProgress = buildInitialProgress();
-
-    setSavingEdits(true);
-    setStatus('Préparation de la retouche...');
-    setStatusTone('processing');
-    setProcessingState({
-      startedAt: Date.now(),
-      current: { ...initialProgress, message: 'Préparation de la retouche...' },
-      history: appendHistory([], { ...initialProgress, message: 'Préparation de la retouche...' }),
-    });
-
-    try {
-      const response = await invoke<BackendResponse>('update_export', {
-        outputPath: result.output_path,
-        manifestPath: result.manifest_path,
-        columns: updatedColumns,
-      });
-
-      setResult(response);
-      setColumns(response.columns);
-      setStatus(response.message);
-      setStatusTone(response.success ? 'success' : 'error');
-      setProgress(100);
-      setProcessingState((previous) =>
-        previous
-          ? {
-              ...previous,
-              current: {
-                ...previous.current,
-                stage: response.success ? 'done' : 'failed',
-                message: response.message,
-                processed_count: response.processed_count,
-                error_count: response.error_count,
-              },
-              history: appendHistory(previous.history, {
-                ...previous.current,
-                stage: response.success ? 'done' : 'failed',
-                message: response.message,
-                processed_count: response.processed_count,
-                error_count: response.error_count,
-                error_detail: response.error_details[0] ?? null,
-              }),
-            }
-          : previous,
-      );
-    } catch (error) {
-      const message = `Erreur: ${String(error)}`;
-      setStatus(message);
-      setStatusTone('error');
-      setProcessingState((previous) =>
-        previous
-          ? {
-              ...previous,
-              current: {
-                ...previous.current,
-                stage: 'failed',
-                message,
-                error_detail: message,
-              },
-              history: appendHistory(previous.history, {
-                ...previous.current,
-                stage: 'failed',
-                message,
-                error_detail: message,
-              }),
-            }
-          : previous,
-      );
-      throw error;
-    } finally {
-      setSavingEdits(false);
-    }
+    setPendingRetouch(buildPendingRetouch(result.output_path, result.manifest_path, updatedColumns));
+    setPageView('home');
+    setStatus(`Retouche prête: ${updatedColumns.length} colonne(s) à recalculer. Lance Start.`);
+    setStatusTone('success');
   };
 
-  const handleCloseResult = () => {
-    if (processing || savingEdits) {
-      return;
+  const exportLabel = useMemo(() => {
+    if (pendingRetouch) {
+      return 'Retouche prête à être lancée';
     }
 
-    setShowResult(false);
-  };
+    if (processing) {
+      return 'Export en cours';
+    }
+
+    if (result) {
+      return result.success ? 'Dernier export terminé' : 'Dernier export en erreur';
+    }
+
+    return 'Aucun export lancé';
+  }, [pendingRetouch, processing, result]);
+
+  const canOpenDetail = !!processingState || !!result;
+  const startButtonLabel = pendingRetouch ? 'Lancer la retouche' : processing ? 'Traitement...' : 'START';
+
+  if (pageView === 'detail') {
+    return (
+      <DetailPage
+        result={result}
+        processing={processing}
+        processingState={processingState}
+        onBack={() => setPageView('home')}
+        onHome={handleHomeNavigation}
+        onOpenOutput={() => void openExportTarget(result?.output_path ?? null, false)}
+        onOpenFolder={() => void openExportTarget(result?.output_path ?? null, true)}
+        onOpenRetouches={() => setPageView('retouches')}
+      />
+    );
+  }
+
+  if (pageView === 'retouches' && result) {
+    return (
+      <RetouchPage
+        result={result}
+        onBack={() => setPageView('detail')}
+        onHome={handleHomeNavigation}
+        onSave={handleSaveRetouchPlan}
+      />
+    );
+  }
 
   return (
     <div className="app">
       <header className="app-header">
         <h1>Rapport Amiante</h1>
-        <span className="subtitle">Suivi en direct, RAG rapide et export Excel retouchable</span>
+        <span className="subtitle">Export suivi en direct, détail séparé et retouches ciblées</span>
       </header>
 
       <div className="app-body">
@@ -463,18 +463,26 @@ export default function App() {
             <span><strong>{files.length}</strong> fichier{files.length > 1 ? 's' : ''}</span>
             <span className="sep">|</span>
             <span><strong>{columns.length}</strong> colonne{columns.length > 1 ? 's' : ''} à exporter</span>
+            {pendingRetouch && (
+              <>
+                <span className="sep">|</span>
+                <span><strong>{pendingRetouch.columns.length}</strong> colonne{pendingRetouch.columns.length > 1 ? 's' : ''} en retouche</span>
+              </>
+            )}
           </div>
 
           <div className="mode-selector">
             <button
               className={`mode-btn ${mode === 'rapide' ? 'active' : ''}`}
               onClick={() => setMode('rapide')}
+              disabled={!!pendingRetouch}
             >
               Rapide (RAG)
             </button>
             <button
               className={`mode-btn ${mode === 'precis' ? 'active' : ''}`}
               onClick={() => setMode('precis')}
+              disabled={!!pendingRetouch}
             >
               Précis (Gemini)
             </button>
@@ -482,12 +490,12 @@ export default function App() {
 
           {status && (
             <div className={`status-bar ${statusTone}`}>
-              {(processing || savingEdits) && <div className="spinner" />}
+              {processing && <div className="spinner" />}
               <span>{status}</span>
             </div>
           )}
 
-          {(processing || savingEdits) && (
+          {processing && (
             <div className="progress-bar">
               <div className="progress-fill" style={{ width: `${progress}%` }} />
             </div>
@@ -495,12 +503,25 @@ export default function App() {
         </div>
 
         <div className="right-panel">
-          <button className="start-btn" onClick={handleStart} disabled={processing || savingEdits || files.length === 0}>
-            {processing ? 'Traitement...' : 'START'}
+          <button className="start-btn" onClick={handleStart} disabled={processing || (!pendingRetouch && files.length === 0)}>
+            {startButtonLabel}
           </button>
-          <button className="export-btn" onClick={() => setShowExport(true)}>
+
+          <button className="export-btn" onClick={() => setShowExport(true)} disabled={!!pendingRetouch}>
             Configurer les colonnes
           </button>
+
+          <div className="export-box">
+            <div className="export-box-header">
+              <strong>Export</strong>
+              {pendingRetouch && <span className="export-badge">Retouche</span>}
+            </div>
+            <p className="export-box-status">{exportLabel}</p>
+            <div className="export-box-timer">{homeElapsedSeconds}s</div>
+            <button className="secondary-btn export-detail-btn" onClick={() => setPageView('detail')} disabled={!canOpenDetail}>
+              Ouvrir le détail
+            </button>
+          </div>
         </div>
       </div>
 
@@ -509,19 +530,6 @@ export default function App() {
           columns={columns}
           onColumnsChange={setColumns}
           onClose={() => setShowExport(false)}
-        />
-      )}
-
-      {showResult && (
-        <ResultModal
-          result={result}
-          processing={processing || savingEdits}
-          progressState={processingState}
-          onClose={handleCloseResult}
-          onOpenOutput={() => void openExportTarget(result?.output_path ?? null, false)}
-          onOpenFolder={() => void openExportTarget(result?.output_dir ?? null, false)}
-          onRevealOutput={() => void openExportTarget(result?.output_path ?? null, true)}
-          onSave={handleSaveEdits}
         />
       )}
     </div>

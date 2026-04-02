@@ -33,7 +33,13 @@ def read_export_dataframe(output_path: str) -> pd.DataFrame:
     if not output_file.exists():
         raise FileNotFoundError(f"Fichier Excel introuvable: {output_file}")
 
-    return pd.read_excel(output_file, sheet_name=EXPORT_SHEET_NAME)
+    dataframe = pd.read_excel(
+        output_file,
+        sheet_name=EXPORT_SHEET_NAME,
+        dtype=object,
+    )
+
+    return dataframe.astype(object)
 
 
 def export_excel(dataframe: pd.DataFrame, output_path: str) -> None:
