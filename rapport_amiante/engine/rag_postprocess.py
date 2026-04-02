@@ -19,7 +19,7 @@ from ..variables.var import RapportAmiante, VALEURS_DIAGNOSTIC
 from ..variables.prompt import build_prompt
 
 # Modèle léger pour le post-traitement RAG
-RAG_POSTPROCESS_MODEL = "gemini-2.0-flash-lite"
+RAG_POSTPROCESS_MODEL = "gemini-2.5-flash-lite"
 
 # Prompt système de post-traitement : focalise le LLM sur la structuration
 _POSTPROCESS_SYSTEM = """

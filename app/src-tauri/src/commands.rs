@@ -1,4 +1,6 @@
+// rapport-amiante/app/src-tauri/src/commands.rs
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::process::Command;
 use tauri::command;
 
@@ -16,8 +18,6 @@ pub struct ProcessResult {
     pub output_path: Option<String>,
 }
 
-/// Commande principale : lance le script Python de traitement
-/// avec les fichiers PDF, le mode (rapide/precis) et les colonnes souhaitees
 #[command]
 pub fn process_files(
     paths: Vec<String>,
@@ -28,25 +28,40 @@ pub fn process_files(
         return Err("Aucun fichier selectionne".to_string());
     }
 
-    // Chemin vers le script Python principal
-    // En dev: depuis app/src-tauri, remonter de 2 niveaux pour atteindre rapport_amiante/
-    // En production (exe bundled): a cote de l'executable
-    let script = find_python_script();
+    // ✅ On cherche la RACINE du projet (là où se trouve rapport_amiante/)
+    let project_root = find_project_root()
+        .ok_or_else(|| "Impossible de trouver la racine du projet".to_string())?;
 
-    // Colonnes separees par virgule
     let columns_str = columns.join(",");
 
     let mut cmd = Command::new("python");
-    cmd.arg(&script)
+    cmd
+        // ✅ current_dir = racine du projet => Python trouve rapport_amiante/ comme package
+        .current_dir(&project_root)
+        // ✅ -m rapport_amiante.main => __package__ = "rapport_amiante" => imports relatifs OK
+        .arg("-m")
+        .arg("rapport_amiante.main")
         .arg("--mode")
         .arg(&mode)
         .arg("--columns")
         .arg(&columns_str);
 
-    // Ajouter chaque fichier PDF
     for path in &paths {
         cmd.arg("--files").arg(path);
     }
+
+        // commands.rs — dans process_files(), avant de passer --mode
+    let python_mode = match mode.as_str() {
+        "rapide" => "gemini",
+        "precis" => "rag",
+        other    => other,          // "gemini" / "rag" passés directement aussi
+    };
+
+    let mut cmd = Command::new("python");
+    cmd.current_dir(&project_root)
+    .arg("-m").arg("rapport_amiante.main")
+    .arg("--mode").arg(python_mode)  // ← python_mode au lieu de &mode
+    .arg("--columns").arg(&columns_str);
 
     let output = cmd
         .output()
@@ -71,42 +86,37 @@ pub fn process_files(
     }
 }
 
-/// Trouve le chemin du script Python
-/// Structure: repo/app/src-tauri/src/ -> remonter 3 niveaux -> repo/rapport_amiante/main.py
-fn find_python_script() -> String {
-    // En dev: depuis la racine du workspace (cargo run dans app/src-tauri)
-    let dev_path = "../../rapport_amiante/main.py";
-    if std::path::Path::new(dev_path).exists() {
-        return dev_path.to_string();
+/// Trouve le répertoire racine du projet (parent direct de rapport_amiante/).
+/// Cherche dans cet ordre : relatif depuis dev, remontée depuis cwd, exe bundlé.
+fn find_project_root() -> Option<PathBuf> {
+    // Dev : depuis app/src-tauri/ on remonte de 2 niveaux → racine du repo
+    let dev_root = PathBuf::from("../../");
+    if dev_root.join("rapport_amiante").join("main.py").exists() {
+        return dev_root.canonicalize().ok();
     }
 
-    // Depuis le repertoire courant
+    // Remontée générique depuis le répertoire courant (jusqu'à 6 niveaux)
     if let Ok(cwd) = std::env::current_dir() {
-        // Remonter jusqu'a trouver rapport_amiante/
-        let mut dir = cwd.clone();
-        for _ in 0..5 {
-            let candidate = dir.join("rapport_amiante").join("main.py");
-            if candidate.exists() {
-                return candidate.to_string_lossy().to_string();
+        let mut dir = cwd;
+        for _ in 0..6 {
+            if dir.join("rapport_amiante").join("main.py").exists() {
+                return Some(dir);
             }
-            if let Some(parent) = dir.parent() {
-                dir = parent.to_path_buf();
-            } else {
-                break;
+            match dir.parent() {
+                Some(p) => dir = p.to_path_buf(),
+                None => break,
             }
         }
     }
 
-    // En production (exe bundled): a cote de l'executable
-    if let Ok(exe_dir) = std::env::current_exe() {
-        if let Some(dir) = exe_dir.parent() {
-            let prod_path = dir.join("main.py");
-            if prod_path.exists() {
-                return prod_path.to_string_lossy().to_string();
+    // Production (exe bundlé) : répertoire de l'exécutable
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(dir) = exe_path.parent() {
+            if dir.join("rapport_amiante").join("main.py").exists() {
+                return Some(dir.to_path_buf());
             }
         }
     }
 
-    // Fallback
-    "main.py".to_string()
+    None
 }
