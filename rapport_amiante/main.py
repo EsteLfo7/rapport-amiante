@@ -4,8 +4,10 @@ import os
 import sys
 import time
 from pathlib import Path
+
 from .paths import default_input_dir, default_output_path
 from .variables.var import MODEL, COLUMNS_FR
+
 
 try:
     from dotenv import load_dotenv
@@ -56,20 +58,23 @@ def main(
         Colonnes a inclure dans l'export Excel.
         Si None, utilise toutes les colonnes de COLUMNS_FR.
     """
+
     mode = _select_mode(mode)
 
-    # Colonnes souhaitees (filtrage)
+
+    # Colonnes souhaitees 
     if columns is None:
         columns = list(COLUMNS_FR.keys())
-    # S'assurer que seules des colonnes connues sont utilisees
     valid_columns = [c for c in columns if c in COLUMNS_FR]
     if not valid_columns:
         valid_columns = list(COLUMNS_FR.keys())
 
+
+
     # Determination des PDFs a traiter
     if pdf_paths:
         pdfs = [Path(p).expanduser().resolve() for p in pdf_paths]
-        output_path = str(pdfs[0].parent / "resultats_amiante.xlsx")
+        output_path = str(pdfs[0].parent / f"resultats_amiante_{int(time.time())}.xlsx")
     else:
         input_dir = default_input_dir()
         pdfs = list(input_dir.glob("*.pdf"))
@@ -80,8 +85,9 @@ def main(
         print(json.dumps(result, ensure_ascii=False))
         sys.exit(1)
 
+    
+
     # Selection du moteur selon le mode avec imports paresseux pour
-    # éviter qu'une dépendance inutilisée casse l'autre mode.
     if mode == MODE_GEMINI:
         from .engine.inference import extract_rapport
 
@@ -94,16 +100,21 @@ def main(
         model_info = RAG_POSTPROCESS_MODEL
         extract_fn = extract_rapport_rag
 
+
+
     rapports = []
     erreurs = []
     error_details: list[str] = []
 
     for pdf_path in pdfs:
+
         prestataire = "default"
+
         try:
             rapport = extract_fn(str(pdf_path), prestataire)
             rapports.append(rapport)
             time.sleep(2)
+
         except Exception as e:
             if "429" in str(e):
                 time.sleep(30)
@@ -117,17 +128,23 @@ def main(
                 erreurs.append(pdf_path.name)
                 error_details.append(f"{pdf_path.name}: {e}")
 
+
     if rapports:
+
         from .engine.export import rapports_to_dataframe, export_excel
 
         df = rapports_to_dataframe(rapports, columns=valid_columns)
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         export_excel(df, output_path)
+
+
         msg = f"{len(rapports)} rapport(s) traite(s), {len(erreurs)} erreur(s). Fichier : {output_path}"
         if error_details:
             msg = f"{msg} Détails: {' | '.join(error_details[:3])}"
         result = {"success": True, "message": msg, "output_path": output_path}
+
     else:
+
         msg = f"Aucun rapport traite. {len(erreurs)} erreur(s)."
         if error_details:
             msg = f"{msg} Détails: {' | '.join(error_details[:3])}"
@@ -138,6 +155,7 @@ def main(
 
 
 if __name__ == "__main__":
+
     parser = argparse.ArgumentParser(description="Traitement de rapports amiante PDF")
     parser.add_argument(
         "--mode",
@@ -145,6 +163,7 @@ if __name__ == "__main__":
         default=DEFAULT_MODE,
         help=f"Mode de traitement : {', '.join(VALID_MODES)} (defaut: {DEFAULT_MODE})",
     )
+
     parser.add_argument(
         "--files",
         nargs="+",
@@ -152,11 +171,13 @@ if __name__ == "__main__":
         metavar="PDF",
         help="Chemins vers les fichiers PDF a traiter",
     )
+
     parser.add_argument(
         "--columns",
         default=None,
         help="Colonnes separees par virgule (ex: reference_rapport,adresse,...)",
     )
+
     args = parser.parse_args()
 
     # Parse colonnes

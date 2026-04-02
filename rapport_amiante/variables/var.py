@@ -2,7 +2,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-2.5-pro"
 
 
 COLUMNS_FR = {

@@ -1,15 +1,13 @@
 from __future__ import annotations
 
+import pandas as pd
 from pathlib import Path
 from typing import List, Optional
 
 from ..variables.var import COLUMNS_FR, RapportAmiante
 
 
-def rapports_to_dataframe(
-    rapports: List[RapportAmiante],
-    columns: Optional[List[str]] = None,
-) -> pd.DataFrame:
+def rapports_to_dataframe(rapports: List[RapportAmiante], columns: Optional[List[str]] = None,) -> pd.DataFrame:
     """
     Convertit une liste de RapportAmiante en DataFrame pandas.
 
@@ -21,6 +19,7 @@ def rapports_to_dataframe(
         Sous-ensemble de cles de COLUMNS_FR a inclure.
         Si None, toutes les colonnes sont incluses.
     """
+
     try:
         import pandas as pd
     except ModuleNotFoundError as exc:
@@ -28,19 +27,19 @@ def rapports_to_dataframe(
             "Dépendance Python manquante: pandas. Installe les dépendances backend."
         ) from exc
 
+
     rows = [r.model_dump() for r in rapports]
     df = pd.DataFrame(rows)
 
-    # Renommer les colonnes techniques en labels FR
     df = df.rename(columns=COLUMNS_FR)
 
     # Filtrage des colonnes souhaitees
     if columns is not None:
-        # Convertir les cles techniques en labels FR
+
         wanted_labels = [
             COLUMNS_FR[c] for c in columns if c in COLUMNS_FR
         ]
-        # Garder uniquement les colonnes presentes dans le df
+
         existing = [c for c in wanted_labels if c in df.columns]
         if existing:
             df = df[existing]
@@ -50,12 +49,14 @@ def rapports_to_dataframe(
 
 def export_excel(df: pd.DataFrame, output_path: str):
     """Exporte le DataFrame vers un fichier Excel formate."""
+
     try:
         import pandas as pd
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "Dépendance Python manquante: pandas/openpyxl. Installe les dépendances backend."
         ) from exc
+
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 

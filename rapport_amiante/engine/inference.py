@@ -9,13 +9,9 @@ from .rag_extractor import build_rag_context
 from .rag_postprocess import postprocess_rag, RAG_POSTPROCESS_MODEL
 
 
-def extract_rapport(
-    pdf_path: str,
-    prestataire: str = "default",
-    model: str = MODEL,
-) -> RapportAmiante:
+def extract_rapport(pdf_path: str, prestataire: str = "default", model: str = MODEL,) -> RapportAmiante:
     """
-    Mode Gemini Flash : envoie le PDF directement à Gemini qui l'analyse
+    Mode Gemini : envoie le PDF directement à Gemini qui l'analyse
     et retourne un objet RapportAmiante structuré.
 
     Parameters
@@ -27,6 +23,7 @@ def extract_rapport(
     model:
         Modèle Gemini à utiliser (défaut : MODEL depuis variables/var.py).
     """
+
     pdf = Path(pdf_path).expanduser().resolve()
     if not pdf.exists():
         raise FileNotFoundError(f"PDF introuvable: {pdf}")
@@ -106,6 +103,7 @@ def extract_rapport_rag(
         Modèle Gemini à utiliser pour le post-traitement
         (défaut : RAG_POSTPROCESS_MODEL = gemini-2.0-flash-lite).
     """
+    
     # Étape 1 : extraction du texte + récupération des contextes par groupe
     pdf = Path(pdf_path).expanduser().resolve()
     if not pdf.exists():
