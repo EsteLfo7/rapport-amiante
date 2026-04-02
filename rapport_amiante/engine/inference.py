@@ -1,16 +1,12 @@
 import os
 import json
-import yaml
 from pathlib import Path
-from google import genai
-from google.genai import types
 
 from ..variables.var import RapportAmiante, MODEL
 from ..variables.prompt import build_prompt
+from ..paths import prestataire_config_path
 from .rag_extractor import build_rag_context
 from .rag_postprocess import postprocess_rag, RAG_POSTPROCESS_MODEL
-
-default_path = Path("config/prestataires/default.yaml")
 
 
 def extract_rapport(
@@ -31,14 +27,44 @@ def extract_rapport(
     model:
         Modèle Gemini à utiliser (défaut : MODEL depuis variables/var.py).
     """
-    with open(default_path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+    pdf = Path(pdf_path).expanduser().resolve()
+    if not pdf.exists():
+        raise FileNotFoundError(f"PDF introuvable: {pdf}")
+
+    try:
+        import yaml
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Dépendance Python manquante: pyyaml. Installe les dépendances backend."
+        ) from exc
+
+    try:
+        from google import genai
+        from google.genai import types
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Dépendance Python manquante: google-genai. Installe les dépendances backend."
+        ) from exc
+
+    config_path = prestataire_config_path(prestataire)
+    if config_path is not None:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+    else:
+        config = {}
     prompt = build_prompt(config)
 
-    with open(pdf_path, "rb") as f:
+    with open(pdf, "rb") as f:
         pdf_bytes = f.read()
 
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "Variable d'environnement GEMINI_API_KEY absente. "
+            "Ajoute-la dans ton environnement ou dans un fichier .env."
+        )
+
+    client = genai.Client(api_key=api_key)
 
     response = client.models.generate_content(
         model=model,
@@ -81,7 +107,11 @@ def extract_rapport_rag(
         (défaut : RAG_POSTPROCESS_MODEL = gemini-2.0-flash-lite).
     """
     # Étape 1 : extraction du texte + récupération des contextes par groupe
-    rag_context = build_rag_context(pdf_path)
+    pdf = Path(pdf_path).expanduser().resolve()
+    if not pdf.exists():
+        raise FileNotFoundError(f"PDF introuvable: {pdf}")
+
+    rag_context = build_rag_context(str(pdf))
 
     # On retire "full_text" : le LLM ne reçoit que les extraits ciblés
     context_by_group = {k: v for k, v in rag_context.items() if k != "full_text"}

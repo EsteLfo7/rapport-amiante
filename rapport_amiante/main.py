@@ -4,12 +4,15 @@ import os
 import sys
 import time
 from pathlib import Path
-from dotenv import load_dotenv
-
-from .engine.inference import extract_rapport, extract_rapport_rag
-from .engine.export import rapports_to_dataframe, export_excel
+from .paths import default_input_dir, default_output_path
 from .variables.var import MODEL, COLUMNS_FR
-from .engine.rag_postprocess import RAG_POSTPROCESS_MODEL
+
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    def load_dotenv(*_args, **_kwargs):
+        return False
+
 
 load_dotenv()
 
@@ -65,28 +68,35 @@ def main(
 
     # Determination des PDFs a traiter
     if pdf_paths:
-        pdfs = [Path(p) for p in pdf_paths]
-        output_path = str(Path(pdf_paths[0]).parent / "resultats_amiante.xlsx")
+        pdfs = [Path(p).expanduser().resolve() for p in pdf_paths]
+        output_path = str(pdfs[0].parent / "resultats_amiante.xlsx")
     else:
-        input_dir = Path("data/input")
+        input_dir = default_input_dir()
         pdfs = list(input_dir.glob("*.pdf"))
-        output_path = "data/output/resultats_amiante.xlsx"
+        output_path = str(default_output_path())
 
     if not pdfs:
         result = {"success": False, "message": "Aucun PDF trouve", "output_path": None}
         print(json.dumps(result, ensure_ascii=False))
         sys.exit(1)
 
-    # Selection du modele selon le mode
+    # Selection du moteur selon le mode avec imports paresseux pour
+    # éviter qu'une dépendance inutilisée casse l'autre mode.
     if mode == MODE_GEMINI:
+        from .engine.inference import extract_rapport
+
         model_info = MODEL
         extract_fn = extract_rapport
     else:
+        from .engine.inference import extract_rapport_rag
+        from .engine.rag_postprocess import RAG_POSTPROCESS_MODEL
+
         model_info = RAG_POSTPROCESS_MODEL
         extract_fn = extract_rapport_rag
 
     rapports = []
     erreurs = []
+    error_details: list[str] = []
 
     for pdf_path in pdfs:
         prestataire = "default"
@@ -102,17 +112,25 @@ def main(
                     rapports.append(rapport)
                 except Exception as e2:
                     erreurs.append(pdf_path.name)
+                    error_details.append(f"{pdf_path.name}: {e2}")
             else:
                 erreurs.append(pdf_path.name)
+                error_details.append(f"{pdf_path.name}: {e}")
 
     if rapports:
+        from .engine.export import rapports_to_dataframe, export_excel
+
         df = rapports_to_dataframe(rapports, columns=valid_columns)
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         export_excel(df, output_path)
         msg = f"{len(rapports)} rapport(s) traite(s), {len(erreurs)} erreur(s). Fichier : {output_path}"
+        if error_details:
+            msg = f"{msg} Détails: {' | '.join(error_details[:3])}"
         result = {"success": True, "message": msg, "output_path": output_path}
     else:
         msg = f"Aucun rapport traite. {len(erreurs)} erreur(s)."
+        if error_details:
+            msg = f"{msg} Détails: {' | '.join(error_details[:3])}"
         result = {"success": False, "message": msg, "output_path": None}
 
     # Sortie JSON pour le frontend Tauri

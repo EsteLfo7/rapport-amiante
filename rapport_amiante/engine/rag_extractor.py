@@ -8,8 +8,6 @@ import re
 from pathlib import Path
 from typing import Optional
 
-import pdfplumber
-
 from ..variables.var import COLUMNS_FR, VALEURS_DIAGNOSTIC
 
 # ---------------------------------------------------------------------------
@@ -64,6 +62,13 @@ GROUP_KEYWORDS: dict[str, list[str]] = {
 
 def _extract_text(pdf_path: str) -> str:
     """Extrait tout le texte d'un PDF via pdfplumber (conserve la mise en page)."""
+    try:
+        import pdfplumber
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Dépendance Python manquante: pdfplumber. Installe les dépendances backend."
+        ) from exc
+
     pages: list[str] = []
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:

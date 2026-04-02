@@ -1,22 +1,8 @@
 // rapport-amiante/app/src-tauri/src/commands.rs
-use serde::{Deserialize, Serialize};
+use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 use tauri::command;
-
-#[derive(Deserialize)]
-pub struct ProcessArgs {
-    pub paths: Vec<String>,
-    pub mode: String,
-    pub columns: Vec<String>,
-}
-
-#[derive(Serialize)]
-pub struct ProcessResult {
-    pub success: bool,
-    pub message: String,
-    pub output_path: Option<String>,
-}
 
 #[command]
 pub fn process_files(
@@ -28,44 +14,33 @@ pub fn process_files(
         return Err("Aucun fichier selectionne".to_string());
     }
 
-    // ✅ On cherche la RACINE du projet (là où se trouve rapport_amiante/)
     let project_root = find_project_root()
         .ok_or_else(|| "Impossible de trouver la racine du projet".to_string())?;
-
-    let columns_str = columns.join(",");
-
-    let mut cmd = Command::new("python");
-    cmd
-        // ✅ current_dir = racine du projet => Python trouve rapport_amiante/ comme package
-        .current_dir(&project_root)
-        // ✅ -m rapport_amiante.main => __package__ = "rapport_amiante" => imports relatifs OK
-        .arg("-m")
-        .arg("rapport_amiante.main")
-        .arg("--mode")
-        .arg(&mode)
-        .arg("--columns")
-        .arg(&columns_str);
-
-    for path in &paths {
-        cmd.arg("--files").arg(path);
-    }
-
-        // commands.rs — dans process_files(), avant de passer --mode
+    let python_bin = find_python_bin();
     let python_mode = match mode.as_str() {
         "rapide" => "gemini",
         "precis" => "rag",
-        other    => other,          // "gemini" / "rag" passés directement aussi
+        other => other,
     };
 
-    let mut cmd = Command::new("python");
+    let columns_str = columns.join(",");
+    let mut cmd = Command::new(&python_bin);
     cmd.current_dir(&project_root)
-    .arg("-m").arg("rapport_amiante.main")
-    .arg("--mode").arg(python_mode)  // ← python_mode au lieu de &mode
-    .arg("--columns").arg(&columns_str);
+        .arg("-m")
+        .arg("rapport_amiante.main")
+        .arg("--mode")
+        .arg(python_mode)
+        .arg("--columns")
+        .arg(&columns_str);
+
+    cmd.arg("--files");
+    for path in &paths {
+        cmd.arg(path);
+    }
 
     let output = cmd
         .output()
-        .map_err(|e| format!("Erreur lors du lancement du script Python: {}", e))?;
+        .map_err(|e| format!("Erreur lors du lancement de {python_bin}: {}", e))?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -82,8 +57,26 @@ pub fn process_files(
         Ok(msg)
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(format!("Erreur Python: {}", stderr))
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let details = if stderr.trim().is_empty() { stdout } else { stderr };
+        Err(format!("Erreur backend Python: {}", details.trim()))
     }
+}
+
+fn find_python_bin() -> String {
+    if let Ok(bin) = env::var("RAPPORT_AMIANTE_PYTHON") {
+        if !bin.trim().is_empty() {
+            return bin;
+        }
+    }
+
+    for candidate in ["python3", "python"] {
+        if Command::new(candidate).arg("--version").output().is_ok() {
+            return candidate.to_string();
+        }
+    }
+
+    "python3".to_string()
 }
 
 /// Trouve le répertoire racine du projet (parent direct de rapport_amiante/).
@@ -112,6 +105,10 @@ fn find_project_root() -> Option<PathBuf> {
     // Production (exe bundlé) : répertoire de l'exécutable
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(dir) = exe_path.parent() {
+            let bundled_root = dir.join("_internal");
+            if bundled_root.join("rapport_amiante").join("main.py").exists() {
+                return Some(bundled_root);
+            }
             if dir.join("rapport_amiante").join("main.py").exists() {
                 return Some(dir.to_path_buf());
             }

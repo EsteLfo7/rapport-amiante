@@ -12,9 +12,6 @@ from __future__ import annotations
 import json
 import os
 
-from google import genai
-from google.genai import types
-
 from ..variables.var import RapportAmiante, VALEURS_DIAGNOSTIC
 from ..variables.prompt import build_prompt
 
@@ -84,9 +81,24 @@ def postprocess_rag(
     RapportAmiante
         Objet Pydantic rempli avec les données extraites.
     """
+    try:
+        from google import genai
+        from google.genai import types
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Dépendance Python manquante: google-genai. Installe les dépendances backend."
+        ) from exc
+
     prompt = _build_postprocess_prompt(context_by_group)
 
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "Variable d'environnement GEMINI_API_KEY absente. "
+            "Ajoute-la dans ton environnement ou dans un fichier .env."
+        )
+
+    client = genai.Client(api_key=api_key)
 
     response = client.models.generate_content(
         model=model,

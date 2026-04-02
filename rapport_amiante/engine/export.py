@@ -1,4 +1,5 @@
-import pandas as pd
+from __future__ import annotations
+
 from pathlib import Path
 from typing import List, Optional
 
@@ -20,6 +21,13 @@ def rapports_to_dataframe(
         Sous-ensemble de cles de COLUMNS_FR a inclure.
         Si None, toutes les colonnes sont incluses.
     """
+    try:
+        import pandas as pd
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Dépendance Python manquante: pandas. Installe les dépendances backend."
+        ) from exc
+
     rows = [r.model_dump() for r in rapports]
     df = pd.DataFrame(rows)
 
@@ -42,6 +50,13 @@ def rapports_to_dataframe(
 
 def export_excel(df: pd.DataFrame, output_path: str):
     """Exporte le DataFrame vers un fichier Excel formate."""
+    try:
+        import pandas as pd
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Dépendance Python manquante: pandas/openpyxl. Installe les dépendances backend."
+        ) from exc
+
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
