@@ -1,148 +1,198 @@
-"""RAG extractor: extrait le texte brut d'un PDF via pdfplumber,
-le découpe en chunks et récupère les passages les plus pertinents
-pour chaque groupe de colonnes défini dans variables/var.py.
-"""
 from __future__ import annotations
 
 import re
-from pathlib import Path
-from typing import Optional
+from dataclasses import dataclass
 
-from ..variables.var import COLUMNS_FR, VALEURS_DIAGNOSTIC
+import pdfplumber
 
-# ---------------------------------------------------------------------------
-# Groupes thématiques de champs — alignés sur RapportAmiante / COLUMNS_FR
-# ---------------------------------------------------------------------------
-CHUNK_SIZE = 800   # caractères par chunk
-CHUNK_OVERLAP = 150
-
-COLUMN_GROUPS: dict[str, list[str]] = {
-    "en_tete": [
-        "reference_rapport", "date_rapport", "operateur_reperage",
-        "prestataire", "adresse", "batiment", "etage", "porte",
-        "reserves", "materiaux_amiantes", "localisation", "nombre_prelevements",
-    ],
-    "cuisine": [
-        "cuisine_sol", "cuisine_murs", "cuisine_plafond",
-        "cuisine_faience", "cuisine_evier",
-    ],
-    "salle_deau": [
-        "sdb_sol", "sdb_murs", "sdb_plafonds", "sdb_faience",
-    ],
-    "wc": [
-        "wc_sol", "wc_murs", "wc_plafond",
-    ],
-    "autres": [
-        "loggia_balcon", "celliers", "autre",
-    ],
-    "commentaires": [
-        "commentaire_1", "commentaire_2", "commentaire_3",
-    ],
-}
-
-# Mots-clés de recherche par groupe (termes présents dans les rapports réels)
-GROUP_KEYWORDS: dict[str, list[str]] = {
-    "en_tete": [
-        "référence", "reference", "date", "opérateur", "operateur",
-        "prestataire", "adresse", "bâtiment", "batiment", "étage", "etage",
-        "porte", "logement", "réserve", "reserve", "matériau", "materiau",
-        "localisation", "prélèvement", "prelevement",
-    ],
-    "cuisine": ["cuisine", "sol", "mur", "plafond", "faïence", "faience", "évier", "evier"],
-    "salle_deau": ["salle d'eau", "sdb", "salle de bain", "sol", "mur", "plafond", "faïence"],
-    "wc": ["wc", "toilette", "sol", "mur", "plafond"],
-    "autres": ["loggia", "balcon", "cellier", "cave", "autre"],
-    "commentaires": ["commentaire", "observation", "remarque", "note"],
-}
+from ..models import ColumnDefinition
+from ..variables.var import (
+    RAG_MAX_CONTEXT_CHARACTERS,
+    RAG_MAX_WINDOWS_PER_COLUMN,
+    RAG_NOISE_HINTS,
+    RAG_RESULT_HINTS,
+    RAG_WINDOW_RADIUS,
+)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _extract_text(pdf_path: str) -> str:
-    """Extrait tout le texte d'un PDF via pdfplumber (conserve la mise en page)."""
-    try:
-        import pdfplumber
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "Dépendance Python manquante: pdfplumber. Installe les dépendances backend."
-        ) from exc
-
-    pages: list[str] = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text(x_tolerance=3, y_tolerance=3)
-            if text:
-                pages.append(text)
-    return "\n".join(pages)
+SPACE_PATTERN = re.compile(r"\s+")
+TOKEN_PATTERN = re.compile(r"[a-z0-9]{3,}")
 
 
-def _chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
-    """Découpe le texte en chunks avec chevauchement."""
-    chunks: list[str] = []
-    start = 0
-    while start < len(text):
-        end = min(start + size, len(text))
-        chunks.append(text[start:end])
-        start += size - overlap
-    return chunks
+@dataclass(frozen=True)
+class LineEntry:
+    index: int
+    page_number: int
+    text: str
+    normalized_text: str
 
 
-def _score_chunk(chunk: str, keywords: list[str]) -> int:
-    """Compte combien de mots-clés apparaissent dans le chunk (insensible à la casse)."""
-    lower = chunk.lower()
-    return sum(1 for kw in keywords if kw.lower() in lower)
+def normalize_text(value: str) -> str:
+    return SPACE_PATTERN.sub(" ", value).strip()
 
-
-def _retrieve_chunks(chunks: list[str], keywords: list[str], top_k: int = 3) -> str:
-    """Retourne les top_k chunks les plus pertinents pour un groupe de colonnes."""
-    scored = sorted(
-        enumerate(chunks),
-        key=lambda x: _score_chunk(x[1], keywords),
-        reverse=True,
-    )
-    best_indices = sorted(idx for idx, _ in scored[:top_k])
-    return "\n...(suite)...\n".join(chunks[i] for i in best_indices)
-
-
-# ---------------------------------------------------------------------------
-# Interface publique
-# ---------------------------------------------------------------------------
 
 def extract_text_from_pdf(pdf_path: str) -> str:
-    """Point d'entrée : retourne le texte brut complet du PDF."""
-    return _extract_text(pdf_path)
+    lines = extract_lines_from_pdf(pdf_path)
+    return "\n".join(line.text for line in lines)
 
 
-def retrieve_context_by_group(full_text: str) -> dict[str, str]:
-    """
-    Pour chaque groupe de colonnes, retourne un contexte textuel ciblé
-    extrait du texte complet du PDF.
+def extract_lines_from_pdf(pdf_path: str) -> list[LineEntry]:
+    lines: list[LineEntry] = []
+    line_index = 0
 
-    Returns
-    -------
-    dict[str, str]
-        Clé = nom du groupe, valeur = texte contextualisé (chunks concatenés).
-    """
-    chunks = _chunk_text(full_text)
-    return {
-        group: _retrieve_chunks(chunks, keywords)
-        for group, keywords in GROUP_KEYWORDS.items()
-    }
+    with pdfplumber.open(pdf_path) as pdf:
+        for page_number, page in enumerate(pdf.pages, start=1):
+            page_text = page.extract_text(x_tolerance=2, y_tolerance=2) or ""
+
+            for raw_line in page_text.splitlines():
+                clean_line = normalize_text(raw_line)
+
+                if not clean_line:
+                    continue
+
+                lines.append(
+                    LineEntry(
+                        index=line_index,
+                        page_number=page_number,
+                        text=clean_line,
+                        normalized_text=clean_line.lower(),
+                    )
+                )
+                line_index += 1
+
+    return lines
 
 
-def build_rag_context(pdf_path: str) -> dict[str, str]:
-    """
-    Pipeline complet RAG pour un PDF :
-    1. Extraction du texte brut
-    2. Découpage en chunks
-    3. Récupération des passages pertinents par groupe de colonnes
+def build_search_terms(column: ColumnDefinition) -> list[str]:
+    terms: list[str] = []
 
-    Returns
-    -------
-    dict avec clés : "full_text" + un contexte par groupe (en_tete, cuisine, …)
-    """
-    full_text = _extract_text(pdf_path)
-    context_by_group = retrieve_context_by_group(full_text)
-    return {"full_text": full_text, **context_by_group}
+    for source in [*column.rag_keywords, column.label, column.description]:
+        normalized_source = normalize_text(source).lower()
+
+        if normalized_source and normalized_source not in terms:
+            terms.append(normalized_source)
+
+        for token in TOKEN_PATTERN.findall(normalized_source):
+            if token not in terms:
+                terms.append(token)
+
+    return terms
+
+
+def score_window(window_text: str, search_terms: list[str]) -> int:
+    score = 0
+
+    for term in search_terms:
+        if term in window_text:
+            score += 3 if " " in term else 1
+
+    for result_hint in RAG_RESULT_HINTS:
+        if result_hint in window_text:
+            score += 2
+
+    for noise_hint in RAG_NOISE_HINTS:
+        if noise_hint in window_text:
+            score -= 3
+
+    return score
+
+
+def merge_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    if not ranges:
+        return []
+
+    merged_ranges: list[tuple[int, int]] = [ranges[0]]
+
+    for start_index, end_index in ranges[1:]:
+        previous_start, previous_end = merged_ranges[-1]
+
+        if start_index <= previous_end + 1:
+            merged_ranges[-1] = (previous_start, max(previous_end, end_index))
+            continue
+
+        merged_ranges.append((start_index, end_index))
+
+    return merged_ranges
+
+
+def retrieve_column_context(
+    lines: list[LineEntry],
+    column: ColumnDefinition,
+    *,
+    window_radius: int = RAG_WINDOW_RADIUS,
+    max_windows: int = RAG_MAX_WINDOWS_PER_COLUMN,
+    max_characters: int = RAG_MAX_CONTEXT_CHARACTERS,
+) -> str:
+    search_terms = build_search_terms(column)
+    candidate_windows: list[tuple[int, int, int]] = []
+
+    for line in lines:
+        if not any(term in line.normalized_text for term in search_terms):
+            continue
+
+        start_index = max(0, line.index - window_radius)
+        end_index = min(len(lines), line.index + window_radius + 1)
+        window_text = "\n".join(lines[position].text for position in range(start_index, end_index)).lower()
+        window_score = score_window(window_text, search_terms)
+
+        if window_score <= 0:
+            continue
+
+        candidate_windows.append((window_score, start_index, end_index))
+
+    if not candidate_windows:
+        fallback_text = "\n".join(line.text for line in lines[: min(len(lines), 18)])
+        return fallback_text[:max_characters]
+
+    candidate_windows.sort(key=lambda item: (-item[0], item[1], item[2]))
+
+    selected_ranges = merge_ranges(
+        sorted((start_index, end_index) for _, start_index, end_index in candidate_windows[:max_windows])
+    )
+
+    contexts: list[str] = []
+    total_length = 0
+
+    for start_index, end_index in selected_ranges:
+        block = "\n".join(lines[position].text for position in range(start_index, end_index))
+
+        if not block:
+            continue
+
+        next_length = total_length + len(block)
+
+        if contexts and next_length > max_characters:
+            break
+
+        contexts.append(block)
+        total_length = next_length
+
+    return "\n\n---\n\n".join(contexts)[:max_characters]
+
+
+def build_rag_context_from_text(full_text: str, columns: list[ColumnDefinition]) -> dict[str, str]:
+    lines: list[LineEntry] = []
+    line_index = 0
+
+    for raw_line in full_text.splitlines():
+        clean_line = normalize_text(raw_line)
+
+        if not clean_line:
+            continue
+
+        lines.append(
+            LineEntry(
+                index=line_index,
+                page_number=1,
+                text=clean_line,
+                normalized_text=clean_line.lower(),
+            )
+        )
+        line_index += 1
+
+    return {column.key: retrieve_column_context(lines, column) for column in columns}
+
+
+def build_rag_context(pdf_path: str, columns: list[ColumnDefinition]) -> dict[str, str]:
+    lines = extract_lines_from_pdf(pdf_path)
+    return {column.key: retrieve_column_context(lines, column) for column in columns}

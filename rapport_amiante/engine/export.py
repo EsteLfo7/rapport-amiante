@@ -1,73 +1,52 @@
 from __future__ import annotations
 
-import pandas as pd
 from pathlib import Path
-from typing import List, Optional
 
-from ..variables.var import COLUMNS_FR, RapportAmiante
+import pandas as pd
 
-
-def rapports_to_dataframe(rapports: List[RapportAmiante], columns: Optional[List[str]] = None,) -> pd.DataFrame:
-    """
-    Convertit une liste de RapportAmiante en DataFrame pandas.
-
-    Parameters
-    ----------
-    rapports : list[RapportAmiante]
-        Rapports extraits.
-    columns : list[str] | None
-        Sous-ensemble de cles de COLUMNS_FR a inclure.
-        Si None, toutes les colonnes sont incluses.
-    """
-
-    try:
-        import pandas as pd
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "Dépendance Python manquante: pandas. Installe les dépendances backend."
-        ) from exc
+from ..models import ColumnDefinition
+from ..variables.var import EXPORT_SHEET_NAME
 
 
-    rows = [r.model_dump() for r in rapports]
-    df = pd.DataFrame(rows)
+def build_dataframe(
+    rows: list[dict[str, str | None]],
+    columns: list[ColumnDefinition],
+) -> pd.DataFrame:
+    ordered_labels = [column.label for column in columns]
+    normalized_rows: list[dict[str, str | None]] = []
 
-    df = df.rename(columns=COLUMNS_FR)
+    for row in rows:
+        normalized_rows.append({column.label: row.get(column.key) for column in columns})
 
-    # Filtrage des colonnes souhaitees
-    if columns is not None:
+    dataframe = pd.DataFrame(normalized_rows)
 
-        wanted_labels = [
-            COLUMNS_FR[c] for c in columns if c in COLUMNS_FR
-        ]
+    for label in ordered_labels:
+        if label not in dataframe.columns:
+            dataframe[label] = None
 
-        existing = [c for c in wanted_labels if c in df.columns]
-        if existing:
-            df = df[existing]
-
-    return df
-
-
-def export_excel(df: pd.DataFrame, output_path: str):
-    """Exporte le DataFrame vers un fichier Excel formate."""
-
-    try:
-        import pandas as pd
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "Dépendance Python manquante: pandas/openpyxl. Installe les dépendances backend."
-        ) from exc
+    return dataframe[ordered_labels]
 
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+def read_export_dataframe(output_path: str) -> pd.DataFrame:
+    output_file = Path(output_path)
 
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Rapports Amiante")
-        ws = writer.sheets["Rapports Amiante"]
+    if not output_file.exists():
+        raise FileNotFoundError(f"Fichier Excel introuvable: {output_file}")
 
-        # Mise en forme : largeur automatique des colonnes
-        for col in ws.columns:
-            max_len = max(
-                (len(str(cell.value)) if cell.value else 0 for cell in col),
+    return pd.read_excel(output_file, sheet_name=EXPORT_SHEET_NAME)
+
+
+def export_excel(dataframe: pd.DataFrame, output_path: str) -> None:
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
+        dataframe.to_excel(writer, index=False, sheet_name=EXPORT_SHEET_NAME)
+        worksheet = writer.sheets[EXPORT_SHEET_NAME]
+
+        for column in worksheet.columns:
+            max_length = max(
+                (len(str(cell.value)) if cell.value is not None else 0 for cell in column),
                 default=10,
             )
-            ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 60)
+            worksheet.column_dimensions[column[0].column_letter].width = min(max_length + 4, 60)

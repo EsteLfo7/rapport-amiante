@@ -1,1 +1,1 @@
-{"main-capability":{"identifier":"main-capability","description":"Main app capability with drag & drop and file dialog permissions","local":true,"windows":["main"],"permissions":["core:window:default","core:event:default","core:window:allow-start-dragging","dialog:allow-open"]}}
+{"main-capability":{"identifier":"main-capability","description":"Main app capability with drag & drop and file dialog permissions","local":true,"windows":["main"],"permissions":["core:window:default","core:event:default","core:window:allow-start-dragging","dialog:allow-open","shell:allow-open"]}}

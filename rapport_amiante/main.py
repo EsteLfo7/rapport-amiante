@@ -1,188 +1,615 @@
+from __future__ import annotations
+
 import argparse
 import json
-import os
 import sys
-import time
+from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 
-from .paths import default_input_dir, default_output_path
-from .variables.var import MODEL, COLUMNS_FR
+from dotenv import load_dotenv
 
-
-try:
-    from dotenv import load_dotenv
-except ModuleNotFoundError:
-    def load_dotenv(*_args, **_kwargs):
-        return False
+from .catalog import resolve_columns
+from .engine.export import build_dataframe, export_excel, read_export_dataframe
+from .engine.inference import extract_rapport, extract_rapport_rag
+from .logging_utils import configure_run_logger
+from .models import (
+    BackendResponse,
+    ColumnDefinition,
+    DocumentRecord,
+    ExportManifest,
+    ProgressPayload,
+    ProcessFilesRequest,
+    RefineExportRequest,
+)
+from .paths import build_manifest_path, build_output_path, default_input_dir
+from .variables.var import MODE_GEMINI, MODE_RAG, VALID_MODES
 
 
 load_dotenv()
 
-# ---------------------------------------------------------------------------
-# Modes de traitement disponibles
-# ---------------------------------------------------------------------------
-MODE_GEMINI = "gemini"  # Envoie le PDF complet a Gemini Flash (nativement multimodal)
-MODE_RAG = "rag"        # Extraction texte pdfplumber + post-traitement LLM leger
 
-VALID_MODES = (MODE_GEMINI, MODE_RAG)
+def write_response(response: BackendResponse, stream_events: bool) -> None:
+    payload = json.dumps(response.model_dump(), ensure_ascii=False)
 
-# Mode par defaut : peut etre surcharge via la variable d'environnement RAG_MODE
-DEFAULT_MODE = os.getenv("RAG_MODE", MODE_GEMINI).lower()
+    if stream_events:
+        sys.stdout.write(json.dumps({"type": "result", "payload": response.model_dump()}, ensure_ascii=False))
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        return
 
-
-def _select_mode(mode: str) -> str:
-    """Valide et retourne le mode de traitement."""
-    if mode not in VALID_MODES:
-        print(f"Mode inconnu '{mode}'. Modes valides : {', '.join(VALID_MODES)}")
-        print(f" Utilisation du mode par defaut : {MODE_GEMINI}")
-        return MODE_GEMINI
-    return mode
+    sys.stdout.write(payload)
 
 
-def main(
-    mode: str = DEFAULT_MODE,
-    pdf_paths: list = None,
-    columns: list = None,
-):
-    """
-    Point d'entree principal.
+def emit_progress(payload: ProgressPayload, stream_events: bool) -> None:
+    if not stream_events:
+        return
 
-    Parameters
-    ----------
-    mode : str
-        Mode de traitement : 'gemini' (defaut) ou 'rag'.
-    pdf_paths : list[str] | None
-        Chemins explicites vers les PDFs a traiter.
-        Si None, lit tous les PDFs dans data/input/.
-    columns : list[str] | None
-        Colonnes a inclure dans l'export Excel.
-        Si None, utilise toutes les colonnes de COLUMNS_FR.
-    """
-
-    mode = _select_mode(mode)
+    sys.stdout.write(json.dumps({"type": "progress", "payload": payload.model_dump()}, ensure_ascii=False))
+    sys.stdout.write("\n")
+    sys.stdout.flush()
 
 
-    # Colonnes souhaitees 
-    if columns is None:
-        columns = list(COLUMNS_FR.keys())
-    valid_columns = [c for c in columns if c in COLUMNS_FR]
-    if not valid_columns:
-        valid_columns = list(COLUMNS_FR.keys())
+def load_request_from_file(request_file: str) -> dict:
+    request_path = Path(request_file).expanduser().resolve()
+    return json.loads(request_path.read_text(encoding="utf-8"))
 
 
-
-    # Determination des PDFs a traiter
-    if pdf_paths:
-        pdfs = [Path(p).expanduser().resolve() for p in pdf_paths]
-        output_path = str(pdfs[0].parent / f"resultats_amiante_{int(time.time())}.xlsx")
-    else:
-        input_dir = default_input_dir()
-        pdfs = list(input_dir.glob("*.pdf"))
-        output_path = str(default_output_path())
-
-    if not pdfs:
-        result = {"success": False, "message": "Aucun PDF trouve", "output_path": None}
-        print(json.dumps(result, ensure_ascii=False))
-        sys.exit(1)
-
-    
-
-    # Selection du moteur selon le mode avec imports paresseux pour
-    if mode == MODE_GEMINI:
-        from .engine.inference import extract_rapport
-
-        model_info = MODEL
-        extract_fn = extract_rapport
-    else:
-        from .engine.inference import extract_rapport_rag
-        from .engine.rag_postprocess import RAG_POSTPROCESS_MODEL
-
-        model_info = RAG_POSTPROCESS_MODEL
-        extract_fn = extract_rapport_rag
+def write_manifest(manifest: ExportManifest, manifest_path: Path) -> None:
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(manifest.model_dump(), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
+def load_manifest(manifest_path: str) -> ExportManifest:
+    manifest_file = Path(manifest_path).expanduser().resolve()
+    payload = json.loads(manifest_file.read_text(encoding="utf-8"))
+    return ExportManifest.model_validate(payload)
 
-    rapports = []
-    erreurs = []
-    error_details: list[str] = []
 
-    for pdf_path in pdfs:
+def resolve_pdf_paths(pdf_paths: list[str]) -> list[Path]:
+    normalized_paths: list[Path] = []
 
-        prestataire = "default"
+    for pdf_path in pdf_paths:
+        pdf_file = Path(pdf_path).expanduser().resolve()
+
+        if pdf_file.exists() and pdf_file.suffix.lower() == ".pdf":
+            normalized_paths.append(pdf_file)
+
+    return normalized_paths
+
+
+def resolve_legacy_request(
+    *,
+    mode: str,
+    pdf_paths: list[str] | None,
+    columns: list[str] | None,
+) -> ProcessFilesRequest:
+    selected_pdf_paths = pdf_paths or [str(path) for path in sorted(default_input_dir().glob("*.pdf"))]
+    selected_columns = resolve_columns(requested_keys=columns)
+    return ProcessFilesRequest(mode=mode, pdf_paths=selected_pdf_paths, columns=selected_columns)
+
+
+def select_extractor(mode: str):
+    if mode == MODE_RAG:
+        return extract_rapport_rag
+
+    return extract_rapport
+
+
+def build_run_timestamp() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def merge_columns(
+    existing_columns: list[ColumnDefinition],
+    updated_columns: list[ColumnDefinition],
+) -> list[ColumnDefinition]:
+    merged_columns = existing_columns.copy()
+    index_by_key = {column.key: index for index, column in enumerate(merged_columns)}
+
+    for column in updated_columns:
+        if column.key in index_by_key:
+            merged_columns[index_by_key[column.key]] = column
+            continue
+
+        index_by_key[column.key] = len(merged_columns)
+        merged_columns.append(column)
+
+    return merged_columns
+
+
+def should_fallback_to_rag(error: Exception) -> bool:
+    error_message = str(error).lower()
+
+    return any(
+        marker in error_message
+        for marker in (
+            "429",
+            "resource_exhausted",
+            "quota",
+            "gemini_api_key",
+            "api key",
+            "permission denied",
+            "403",
+            "401",
+        )
+    )
+
+
+def process_request(
+    request: ProcessFilesRequest,
+    timestamp: str,
+    *,
+    stream_events: bool,
+) -> BackendResponse:
+    started_at = perf_counter()
+    logger, log_path = configure_run_logger(prefix="process", timestamp=timestamp)
+    columns = resolve_columns(requested_columns=request.columns)
+    pdf_files = resolve_pdf_paths(request.pdf_paths)
+    total_files = len(pdf_files)
+    fallback_count = 0
+
+    logger.info(
+        "Lancement traitement | mode=%s | pdfs=%s | colonnes=%s",
+        request.mode,
+        len(pdf_files),
+        len(columns),
+    )
+
+    if not pdf_files:
+        return BackendResponse(
+            success=False,
+            message="Aucun PDF valide à traiter.",
+            output_dir=None,
+            log_path=str(log_path),
+            columns=columns,
+        )
+
+    emit_progress(
+        ProgressPayload(
+            stage="starting",
+            message=f"Préparation du traitement de {total_files} fichier(s)",
+            total_files=total_files,
+        ),
+        stream_events,
+    )
+
+    extractor = select_extractor(request.mode)
+    rows: list[dict[str, str | None]] = []
+    documents: list[DocumentRecord] = []
+    errors: list[str] = []
+
+    for file_index, pdf_file in enumerate(pdf_files, start=1):
+        def progress_callback(stage: str, message: str) -> None:
+            emit_progress(
+                ProgressPayload(
+                    stage=stage,
+                    message=message,
+                    total_files=total_files,
+                    current_file_index=file_index,
+                    processed_count=len(rows),
+                    error_count=len(errors),
+                    file_name=pdf_file.name,
+                ),
+                stream_events,
+            )
+
+        emit_progress(
+            ProgressPayload(
+                stage="file_start",
+                message=f"Analyse du fichier {file_index}/{total_files} : {pdf_file.name}",
+                total_files=total_files,
+                current_file_index=file_index,
+                processed_count=len(rows),
+                error_count=len(errors),
+                file_name=pdf_file.name,
+            ),
+            stream_events,
+        )
 
         try:
-            rapport = extract_fn(str(pdf_path), prestataire)
-            rapports.append(rapport)
-            time.sleep(2)
+            row = extractor(
+                str(pdf_file),
+                columns=columns,
+                logger=logger,
+                progress_callback=progress_callback,
+            )
+            rows.append(row)
+            documents.append(
+                DocumentRecord(
+                    pdf_path=str(pdf_file),
+                    pdf_name=pdf_file.name,
+                    row_index=len(rows) - 1,
+                )
+            )
+            logger.info("Extraction réussie | fichier=%s", pdf_file.name)
+            emit_progress(
+                ProgressPayload(
+                    stage="file_done",
+                    message=f"Fichier {file_index}/{total_files} traité avec succès",
+                    total_files=total_files,
+                    current_file_index=file_index,
+                    processed_count=len(rows),
+                    error_count=len(errors),
+                    file_name=pdf_file.name,
+                ),
+                stream_events,
+            )
 
-        except Exception as e:
-            if "429" in str(e):
-                time.sleep(30)
+        except Exception as error:
+            if request.mode == MODE_GEMINI and should_fallback_to_rag(error):
+                fallback_count += 1
+                logger.warning("Bascule automatique vers le mode RAG | fichier=%s", pdf_file.name)
+                emit_progress(
+                    ProgressPayload(
+                        stage="fallback_rag",
+                        message=f"Moteur précis indisponible, bascule RAG sur {pdf_file.name}",
+                        total_files=total_files,
+                        current_file_index=file_index,
+                        processed_count=len(rows),
+                        error_count=len(errors),
+                        file_name=pdf_file.name,
+                        error_detail=str(error),
+                    ),
+                    stream_events,
+                )
+
                 try:
-                    rapport = extract_fn(str(pdf_path), prestataire)
-                    rapports.append(rapport)
-                except Exception as e2:
-                    erreurs.append(pdf_path.name)
-                    error_details.append(f"{pdf_path.name}: {e2}")
-            else:
-                erreurs.append(pdf_path.name)
-                error_details.append(f"{pdf_path.name}: {e}")
+                    row = extract_rapport_rag(
+                        str(pdf_file),
+                        columns=columns,
+                        logger=logger,
+                        progress_callback=progress_callback,
+                    )
+                    rows.append(row)
+                    documents.append(
+                        DocumentRecord(
+                            pdf_path=str(pdf_file),
+                            pdf_name=pdf_file.name,
+                            row_index=len(rows) - 1,
+                        )
+                    )
+                    logger.info("Extraction de secours RAG réussie | fichier=%s", pdf_file.name)
+                    emit_progress(
+                        ProgressPayload(
+                            stage="file_done",
+                            message=f"Fichier {file_index}/{total_files} traité via RAG de secours",
+                            total_files=total_files,
+                            current_file_index=file_index,
+                            processed_count=len(rows),
+                            error_count=len(errors),
+                            file_name=pdf_file.name,
+                        ),
+                        stream_events,
+                    )
+                    continue
+
+                except Exception as fallback_error:
+                    errors.append(f"{pdf_file.name}: {fallback_error}")
+                    logger.exception("Echec extraction de secours | fichier=%s", pdf_file.name)
+                    emit_progress(
+                        ProgressPayload(
+                            stage="file_error",
+                            message=f"Echec du fichier {file_index}/{total_files}",
+                            total_files=total_files,
+                            current_file_index=file_index,
+                            processed_count=len(rows),
+                            error_count=len(errors),
+                            file_name=pdf_file.name,
+                            error_detail=str(fallback_error),
+                        ),
+                        stream_events,
+                    )
+                    continue
+
+            errors.append(f"{pdf_file.name}: {error}")
+            logger.exception("Echec extraction | fichier=%s", pdf_file.name)
+            emit_progress(
+                ProgressPayload(
+                    stage="file_error",
+                    message=f"Echec du fichier {file_index}/{total_files}",
+                    total_files=total_files,
+                    current_file_index=file_index,
+                    processed_count=len(rows),
+                    error_count=len(errors),
+                    file_name=pdf_file.name,
+                    error_detail=str(error),
+                ),
+                stream_events,
+            )
+
+    if not rows:
+        return BackendResponse(
+            success=False,
+            message="Aucun rapport n'a pu être traité.",
+            output_dir=None,
+            log_path=str(log_path),
+            error_count=len(errors),
+            duration_seconds=round(perf_counter() - started_at, 2),
+            error_details=errors,
+            columns=columns,
+        )
+
+    emit_progress(
+        ProgressPayload(
+            stage="exporting",
+            message="Création du fichier Excel et du manifeste",
+            total_files=total_files,
+            current_file_index=total_files,
+            processed_count=len(rows),
+            error_count=len(errors),
+        ),
+        stream_events,
+    )
+
+    dataframe = build_dataframe(rows=rows, columns=columns)
+    output_path = build_output_path(timestamp)
+    manifest_path = build_manifest_path(output_path)
+    export_excel(dataframe, str(output_path))
+
+    manifest = ExportManifest(
+        created_at=timestamp,
+        mode=request.mode,
+        output_path=str(output_path),
+        columns=columns,
+        documents=documents,
+    )
+    write_manifest(manifest, manifest_path)
+
+    logger.info(
+        "Traitement terminé | output=%s | manifest=%s | succes=%s | erreurs=%s",
+        output_path,
+        manifest_path,
+        len(rows),
+        len(errors),
+    )
+
+    message = f"Export terminé: {len(rows)} rapport(s) traité(s)"
+
+    if errors:
+        message = f"{message}, {len(errors)} erreur(s)"
+
+    if fallback_count:
+        message = f"{message}, {fallback_count} bascule(s) RAG"
+
+    return BackendResponse(
+        success=True,
+        message=message,
+        output_path=str(output_path),
+        output_dir=str(output_path.parent),
+        manifest_path=str(manifest_path),
+        log_path=str(log_path),
+        processed_count=len(rows),
+        error_count=len(errors),
+        duration_seconds=round(perf_counter() - started_at, 2),
+        error_details=errors,
+        columns=columns,
+    )
 
 
-    if rapports:
+def refine_request(
+    request: RefineExportRequest,
+    timestamp: str,
+    *,
+    stream_events: bool,
+) -> BackendResponse:
+    started_at = perf_counter()
+    logger, log_path = configure_run_logger(prefix="refine", timestamp=timestamp)
+    manifest = load_manifest(request.manifest_path)
+    updated_columns = resolve_columns(requested_columns=request.columns)
+    merged_columns = merge_columns(manifest.columns, updated_columns)
+    existing_columns_by_key = {column.key: column for column in manifest.columns}
+    extractor = select_extractor(manifest.mode)
+    dataframe = read_export_dataframe(request.output_path)
+    errors: list[str] = []
+    updated_count = 0
+    total_files = len(manifest.documents)
 
-        from .engine.export import rapports_to_dataframe, export_excel
+    logger.info(
+        "Lancement retouche | output=%s | colonnes=%s | documents=%s",
+        request.output_path,
+        len(updated_columns),
+        len(manifest.documents),
+    )
 
-        df = rapports_to_dataframe(rapports, columns=valid_columns)
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        export_excel(df, output_path)
+    emit_progress(
+        ProgressPayload(
+            stage="starting",
+            message=f"Préparation de la retouche sur {total_files} fichier(s)",
+            total_files=total_files,
+        ),
+        stream_events,
+    )
+
+    for column in updated_columns:
+        previous_column = existing_columns_by_key.get(column.key)
+
+        if previous_column and previous_column.label != column.label and previous_column.label in dataframe.columns:
+            dataframe = dataframe.rename(columns={previous_column.label: column.label})
+
+        if column.label not in dataframe.columns:
+            dataframe[column.label] = None
+
+    for file_index, document in enumerate(manifest.documents, start=1):
+        def progress_callback(stage: str, message: str) -> None:
+            emit_progress(
+                ProgressPayload(
+                    stage=stage,
+                    message=message,
+                    total_files=total_files,
+                    current_file_index=file_index,
+                    processed_count=updated_count,
+                    error_count=len(errors),
+                    file_name=document.pdf_name,
+                ),
+                stream_events,
+            )
+
+        emit_progress(
+            ProgressPayload(
+                stage="file_start",
+                message=f"Retouche du fichier {file_index}/{total_files} : {document.pdf_name}",
+                total_files=total_files,
+                current_file_index=file_index,
+                processed_count=updated_count,
+                error_count=len(errors),
+                file_name=document.pdf_name,
+            ),
+            stream_events,
+        )
+
+        try:
+            refreshed_row = extractor(
+                document.pdf_path,
+                columns=updated_columns,
+                logger=logger,
+                progress_callback=progress_callback,
+            )
+
+            for column in updated_columns:
+                dataframe.loc[document.row_index, column.label] = refreshed_row.get(column.key)
+
+            updated_count += 1
+            logger.info("Retouche réussie | fichier=%s", document.pdf_name)
+            emit_progress(
+                ProgressPayload(
+                    stage="file_done",
+                    message=f"Retouche terminée pour {document.pdf_name}",
+                    total_files=total_files,
+                    current_file_index=file_index,
+                    processed_count=updated_count,
+                    error_count=len(errors),
+                    file_name=document.pdf_name,
+                ),
+                stream_events,
+            )
+
+        except Exception as error:
+            errors.append(f"{document.pdf_name}: {error}")
+            logger.exception("Echec retouche | fichier=%s", document.pdf_name)
+            emit_progress(
+                ProgressPayload(
+                    stage="file_error",
+                    message=f"Echec de la retouche sur {document.pdf_name}",
+                    total_files=total_files,
+                    current_file_index=file_index,
+                    processed_count=updated_count,
+                    error_count=len(errors),
+                    file_name=document.pdf_name,
+                    error_detail=str(error),
+                ),
+                stream_events,
+            )
+
+    ordered_labels = [column.label for column in merged_columns]
+    remaining_labels = [label for label in dataframe.columns if label not in ordered_labels]
+    dataframe = dataframe[ordered_labels + remaining_labels]
+
+    emit_progress(
+        ProgressPayload(
+            stage="exporting",
+            message="Mise à jour du fichier Excel",
+            total_files=total_files,
+            current_file_index=total_files,
+            processed_count=updated_count,
+            error_count=len(errors),
+        ),
+        stream_events,
+    )
+
+    export_excel(dataframe, request.output_path)
+
+    refreshed_manifest = manifest.model_copy(update={"columns": merged_columns, "output_path": request.output_path})
+    write_manifest(refreshed_manifest, Path(request.manifest_path).expanduser().resolve())
+
+    message = f"Retouches enregistrées: {updated_count} ligne(s) recalculée(s)"
+
+    if errors:
+        message = f"{message}, {len(errors)} erreur(s)"
+
+    return BackendResponse(
+        success=updated_count > 0,
+        message=message,
+        output_path=request.output_path,
+        output_dir=str(Path(request.output_path).expanduser().resolve().parent),
+        manifest_path=request.manifest_path,
+        log_path=str(log_path),
+        processed_count=updated_count,
+        error_count=len(errors),
+        duration_seconds=round(perf_counter() - started_at, 2),
+        error_details=errors,
+        columns=merged_columns,
+    )
 
 
-        msg = f"{len(rapports)} rapport(s) traite(s), {len(erreurs)} erreur(s). Fichier : {output_path}"
-        if error_details:
-            msg = f"{msg} Détails: {' | '.join(error_details[:3])}"
-        result = {"success": True, "message": msg, "output_path": output_path}
+def run_request(raw_request: dict, timestamp: str, *, stream_events: bool) -> BackendResponse:
+    action = raw_request.get("action", "process")
 
-    else:
+    if action == "refine":
+        request = RefineExportRequest.model_validate(raw_request)
+        return refine_request(request, timestamp, stream_events=stream_events)
 
-        msg = f"Aucun rapport traite. {len(erreurs)} erreur(s)."
-        if error_details:
-            msg = f"{msg} Détails: {' | '.join(error_details[:3])}"
-        result = {"success": False, "message": msg, "output_path": None}
-
-    # Sortie JSON pour le frontend Tauri
-    print(json.dumps(result, ensure_ascii=False))
+    request = ProcessFilesRequest.model_validate(raw_request)
+    return process_request(request, timestamp, stream_events=stream_events)
 
 
-if __name__ == "__main__":
-
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Traitement de rapports amiante PDF")
+    parser.add_argument("--request-file", default=None, help="Fichier JSON de requête")
+    parser.add_argument(
+        "--stream-events",
+        action="store_true",
+        help="Émet les événements de progression en JSON ligne par ligne",
+    )
     parser.add_argument(
         "--mode",
         choices=VALID_MODES,
-        default=DEFAULT_MODE,
-        help=f"Mode de traitement : {', '.join(VALID_MODES)} (defaut: {DEFAULT_MODE})",
+        default=MODE_GEMINI,
+        help=f"Mode de traitement : {', '.join(VALID_MODES)}",
     )
-
-    parser.add_argument(
-        "--files",
-        nargs="+",
-        default=None,
-        metavar="PDF",
-        help="Chemins vers les fichiers PDF a traiter",
-    )
-
+    parser.add_argument("--files", nargs="+", default=None, metavar="PDF", help="Fichiers PDF à traiter")
     parser.add_argument(
         "--columns",
         default=None,
-        help="Colonnes separees par virgule (ex: reference_rapport,adresse,...)",
+        help="Clés de colonnes séparées par des virgules",
     )
+    return parser.parse_args()
 
-    args = parser.parse_args()
 
-    # Parse colonnes
-    cols = None
-    if args.columns:
-        cols = [c.strip() for c in args.columns.split(",") if c.strip()]
+def main() -> None:
+    args = parse_args()
+    timestamp = build_run_timestamp()
+    stream_events = bool(args.stream_events)
 
-    main(mode=args.mode, pdf_paths=args.files, columns=cols)
+    try:
+        if args.request_file:
+            raw_request = load_request_from_file(args.request_file)
+        else:
+            requested_columns = None
+
+            if args.columns:
+                requested_columns = [item.strip() for item in args.columns.split(",") if item.strip()]
+
+            raw_request = resolve_legacy_request(
+                mode=args.mode,
+                pdf_paths=args.files,
+                columns=requested_columns,
+            ).model_dump()
+
+        response = run_request(raw_request, timestamp, stream_events=stream_events)
+
+    except Exception as error:
+        response = BackendResponse(
+            success=False,
+            message=str(error),
+            log_path=None,
+        )
+
+    write_response(response, stream_events)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,71 +1,75 @@
-// Colonnes minimales - présentes dans la quasi-totalité des rapports
-export const COLUMNS_SIMPLE: string[] = [
-  'reference_rapport',
-  'date_rapport',
-  'operateur_reperage',
-  'prestataire',
-  'adresse',
-  'batiment',
-  'etage',
-  'porte',
-  'reserves',
-  'conclusion_presence_amiante',
-];
+import COLUMN_CATALOG from './catalog/column_catalog.json';
 
-// Toutes les colonnes disponibles (COLUMNS_FR from var.py)
-export const COLUMNS_COMPLET: string[] = [
-  'reference_rapport',
-  'date_rapport',
-  'operateur_reperage',
-  'prestataire',
-  'adresse',
-  'batiment',
-  'etage',
-  'porte',
-  'localisation_lot',
-  'reserves',
-  'conclusion_presence_amiante',
-  'sdb_colle_faience',
-  'sdb_enduits_murs',
-  'sdb_enduits_plafonds',
-  'sdb_revetement_sol',
-  'wc_enduits_murs',
-  'wc_enduits_plafond',
-  'wc_revetement_sol',
-  'cuisine_faience',
-  'cuisine_enduits_murs',
-  'cuisine_enduits_plafonds',
-  'cuisine_revetement_sol',
-  'commentaire_amiex_1',
-  'commentaire_amiex_2',
-  'commentaire_amiex_3',
-];
+export interface ColumnDefinition {
+  key: string;
+  label: string;
+  description: string;
+  rag_keywords: string[];
+  postprocess_prompt: string;
+  category: string;
+  simple: boolean;
+  builtin: boolean;
+}
 
-// Labels FR pour affichage (mapping depuis COLUMNS_FR de var.py)
-export const COLUMNS_LABELS: Record<string, string> = {
-  reference_rapport: 'Référence du rapport',
-  date_rapport: 'Date du rapport',
-  operateur_reperage: 'Opérateur de repérage',
-  prestataire: 'Prestataire',
-  adresse: 'Adresse',
-  batiment: 'Bâtiment',
-  etage: 'Etage',
-  porte: 'Porte / Logement',
-  localisation_lot: 'Localisation / Lot',
-  reserves: 'Réserves',
-  conclusion_presence_amiante: "Conclusion - Présence d'amiante",
-  sdb_colle_faience: "Salle d'eau Colle de faïence",
-  sdb_enduits_murs: "Salle d'eau enduits murs",
-  sdb_enduits_plafonds: "Salle d'eau enduits plafonds",
-  sdb_revetement_sol: "Salle d'eau revêtement de sol",
-  wc_enduits_murs: 'WC enduits murs',
-  wc_enduits_plafond: 'WC enduits plafond',
-  wc_revetement_sol: 'WC revêtement de sol',
-  cuisine_faience: 'Cuisine Faïence',
-  cuisine_enduits_murs: 'Cuisine enduits murs',
-  cuisine_enduits_plafonds: 'Cuisine enduits plafonds',
-  cuisine_revetement_sol: 'Cuisine revêtement de sol',
-  commentaire_amiex_1: 'Commentaire Amiex',
-  commentaire_amiex_2: 'Commentaire Amiex 2',
-  commentaire_amiex_3: 'Commentaire Amiex 3',
-};
+interface ColumnCatalogPayload {
+  version: number;
+  columns: ColumnDefinition[];
+}
+
+const COLUMN_PAYLOAD = COLUMN_CATALOG as ColumnCatalogPayload;
+
+export const AVAILABLE_COLUMNS: ColumnDefinition[] = COLUMN_PAYLOAD.columns.map((column) => ({
+  ...column,
+  rag_keywords: [...column.rag_keywords],
+}));
+
+export const SIMPLE_COLUMNS: ColumnDefinition[] = AVAILABLE_COLUMNS.filter((column) => column.simple);
+export const COMPLETE_COLUMNS: ColumnDefinition[] = [...AVAILABLE_COLUMNS];
+export const COLUMNS_BY_KEY: Record<string, ColumnDefinition> = Object.fromEntries(
+  AVAILABLE_COLUMNS.map((column) => [column.key, column]),
+);
+
+export function cloneColumn(column: ColumnDefinition): ColumnDefinition {
+  return {
+    ...column,
+    rag_keywords: [...column.rag_keywords],
+  };
+}
+
+export function slugifyColumnKey(label: string): string {
+  return label
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+export function parseKeywords(value: string): string[] {
+  return value
+    .split(',')
+    .map((keyword) => keyword.trim())
+    .filter(Boolean);
+}
+
+export function keywordsToText(keywords: string[]): string {
+  return keywords.join(', ');
+}
+
+export function createCustomColumnDefinition(input: {
+  label: string;
+  description: string;
+  rag_keywords: string[];
+  postprocess_prompt: string;
+}): ColumnDefinition {
+  return {
+    key: slugifyColumnKey(input.label),
+    label: input.label.trim(),
+    description: input.description.trim(),
+    rag_keywords: [...input.rag_keywords],
+    postprocess_prompt: input.postprocess_prompt.trim(),
+    category: 'Personnalise',
+    simple: false,
+    builtin: false,
+  };
+}

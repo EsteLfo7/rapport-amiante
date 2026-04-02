@@ -1,0 +1,255 @@
+{
+  "version": 1,
+  "columns": [
+    {
+      "key": "reference_rapport",
+      "label": "Référence du rapport",
+      "category": "Informations générales",
+      "description": "Identifiant unique du rapport ou numéro de dossier.",
+      "rag_keywords": ["référence", "reference", "numéro de dossier", "numero de dossier", "rapport", "n°"],
+      "postprocess_prompt": "Retourne la référence exacte du rapport, sans reformulation ni ajout.",
+      "simple": true,
+      "builtin": true
+    },
+    {
+      "key": "date_rapport",
+      "label": "Date du rapport",
+      "category": "Informations générales",
+      "description": "Date d'émission du rapport au format JJ/MM/AAAA.",
+      "rag_keywords": ["date du rapport", "date d’émission", "date d'emission", "rapport du", "date du repérage", "date du reperage"],
+      "postprocess_prompt": "Retourne une date unique au format JJ/MM/AAAA. Prends de préférence la date d'émission du rapport.",
+      "simple": true,
+      "builtin": true
+    },
+    {
+      "key": "operateur_reperage",
+      "label": "Opérateur de repérage",
+      "category": "Informations générales",
+      "description": "Nom et prénom de la personne physique ayant réalisé le repérage.",
+      "rag_keywords": ["opérateur", "operateur", "repérage", "reperage", "nom prénom", "nom prenom", "signataire"],
+      "postprocess_prompt": "Retourne uniquement le nom complet de l'opérateur de repérage.",
+      "simple": true,
+      "builtin": true
+    },
+    {
+      "key": "prestataire",
+      "label": "Prestataire",
+      "category": "Informations générales",
+      "description": "Raison sociale ou nom court de la société prestataire ayant réalisé le rapport.",
+      "rag_keywords": ["raison sociale", "entreprise", "prestataire", "société", "societe", "siret"],
+      "postprocess_prompt": "Retourne le nom de la société prestataire, pas l'opérateur.",
+      "simple": true,
+      "builtin": true
+    },
+    {
+      "key": "adresse",
+      "label": "Adresse",
+      "category": "Informations générales",
+      "description": "Adresse postale du bien inspecté, sans les détails de lot si possible.",
+      "rag_keywords": ["adresse", "rue", "code postal", "ville", "immeuble bâti visité", "immeuble bati visite"],
+      "postprocess_prompt": "Retourne l'adresse la plus complète possible sur une seule ligne.",
+      "simple": true,
+      "builtin": true
+    },
+    {
+      "key": "batiment",
+      "label": "Bâtiment",
+      "category": "Informations générales",
+      "description": "Référence de bâtiment, hall ou escalier si elle est mentionnée.",
+      "rag_keywords": ["bât", "bat", "bâtiment", "batiment", "escalier", "hall"],
+      "postprocess_prompt": "Retourne uniquement la référence du bâtiment, du hall ou de l'escalier si elle existe.",
+      "simple": true,
+      "builtin": true
+    },
+    {
+      "key": "etage",
+      "label": "Étage",
+      "category": "Informations générales",
+      "description": "Niveau ou étage du logement inspecté.",
+      "rag_keywords": ["étage", "etage", "niveau", "rdc", "r+"],
+      "postprocess_prompt": "Retourne un code court comme RDC, R+1, 12ème étage, ou null si absent.",
+      "simple": true,
+      "builtin": true
+    },
+    {
+      "key": "porte",
+      "label": "Porte / Logement",
+      "category": "Informations générales",
+      "description": "Numéro ou identifiant court du logement ou de la porte.",
+      "rag_keywords": ["appartement", "appart", "logement", "porte", "n°", "numero"],
+      "postprocess_prompt": "Retourne uniquement l'identifiant du logement ou de la porte.",
+      "simple": true,
+      "builtin": true
+    },
+    {
+      "key": "localisation_lot",
+      "label": "Localisation / Lot",
+      "category": "Informations générales",
+      "description": "Précision sur le lot, le périmètre ou la localisation générale du logement inspecté.",
+      "rag_keywords": ["lot", "localisation", "périmètre", "perimetre", "périmètre de repérage", "perimetre de reperage"],
+      "postprocess_prompt": "Retourne une mention courte et utile sur le lot ou la localisation générale.",
+      "simple": false,
+      "builtin": true
+    },
+    {
+      "key": "reserves",
+      "label": "Réserves",
+      "category": "Informations générales",
+      "description": "Liste courte des éléments non inspectés, non visités ou non accessibles.",
+      "rag_keywords": ["réserve", "reserve", "non visité", "non visite", "non accessible", "investigations approfondies", "raison"],
+      "postprocess_prompt": "Retourne une liste courte des réserves séparées par des virgules. Retourne null s'il n'y a pas de réserve.",
+      "simple": true,
+      "builtin": true
+    },
+    {
+      "key": "conclusion_presence_amiante",
+      "label": "Conclusion - Présence d'amiante",
+      "category": "Informations générales",
+      "description": "Conclusion globale sur la présence ou l'absence d'amiante dans le périmètre.",
+      "rag_keywords": ["conclusion", "présence d'amiante", "presence d'amiante", "absence d'amiante", "les conclusions", "contenant de l'amiante"],
+      "postprocess_prompt": "Retourne exactement l'une des valeurs suivantes si possible: Présence d'amiante, Absence d'amiante, Réserve, Absence d'informations.",
+      "simple": true,
+      "builtin": true
+    },
+    {
+      "key": "sdb_colle_faience",
+      "label": "Salle d'eau Colle de faïence",
+      "category": "Salle d'eau",
+      "description": "Diagnostic amiante pour la colle de faïence en salle d'eau ou salle de bain.",
+      "rag_keywords": ["sdbain", "salle d'eau", "salle de bain", "faïence", "faience", "colle de faïence", "colle de faience"],
+      "postprocess_prompt": "Retourne exactement l'une des valeurs suivantes: Présence d'amiante, Absence d'amiante, Réserve, Absence d'informations. Retourne null si la colonne ne s'applique pas.",
+      "simple": false,
+      "builtin": true
+    },
+    {
+      "key": "sdb_enduits_murs",
+      "label": "Salle d'eau enduits murs",
+      "category": "Salle d'eau",
+      "description": "Diagnostic amiante pour les enduits ou revêtements muraux de la salle d'eau.",
+      "rag_keywords": ["sdbain", "salle d'eau", "salle de bain", "enduit", "mur", "cloison", "revêtements de murs", "revetements de murs"],
+      "postprocess_prompt": "Retourne exactement l'une des valeurs suivantes: Présence d'amiante, Absence d'amiante, Réserve, Absence d'informations. Retourne null si la colonne ne s'applique pas.",
+      "simple": false,
+      "builtin": true
+    },
+    {
+      "key": "sdb_enduits_plafonds",
+      "label": "Salle d'eau enduits plafonds",
+      "category": "Salle d'eau",
+      "description": "Diagnostic amiante pour les enduits ou revêtements de plafond en salle d'eau.",
+      "rag_keywords": ["sdbain", "salle d'eau", "salle de bain", "enduit", "plafond", "plafonds", "faux plafonds"],
+      "postprocess_prompt": "Retourne exactement l'une des valeurs suivantes: Présence d'amiante, Absence d'amiante, Réserve, Absence d'informations. Retourne null si la colonne ne s'applique pas.",
+      "simple": false,
+      "builtin": true
+    },
+    {
+      "key": "sdb_revetement_sol",
+      "label": "Salle d'eau revêtement de sol",
+      "category": "Salle d'eau",
+      "description": "Diagnostic amiante pour le revêtement de sol de la salle d'eau.",
+      "rag_keywords": ["sdbain", "salle d'eau", "salle de bain", "sol", "revêtements de sols", "revetements de sols", "colle de carrelage", "carrelage"],
+      "postprocess_prompt": "Retourne exactement l'une des valeurs suivantes: Présence d'amiante, Absence d'amiante, Réserve, Absence d'informations. Retourne null si la colonne ne s'applique pas.",
+      "simple": false,
+      "builtin": true
+    },
+    {
+      "key": "wc_enduits_murs",
+      "label": "WC enduits murs",
+      "category": "WC",
+      "description": "Diagnostic amiante pour les enduits ou revêtements muraux des WC.",
+      "rag_keywords": ["wc", "toilettes", "enduit", "mur", "cloison", "revêtements de murs", "revetements de murs"],
+      "postprocess_prompt": "Retourne exactement l'une des valeurs suivantes: Présence d'amiante, Absence d'amiante, Réserve, Absence d'informations. Retourne null si la colonne ne s'applique pas.",
+      "simple": false,
+      "builtin": true
+    },
+    {
+      "key": "wc_enduits_plafond",
+      "label": "WC enduits plafond",
+      "category": "WC",
+      "description": "Diagnostic amiante pour les enduits ou revêtements de plafond des WC.",
+      "rag_keywords": ["wc", "toilettes", "enduit", "plafond", "plafonds", "faux plafonds"],
+      "postprocess_prompt": "Retourne exactement l'une des valeurs suivantes: Présence d'amiante, Absence d'amiante, Réserve, Absence d'informations. Retourne null si la colonne ne s'applique pas.",
+      "simple": false,
+      "builtin": true
+    },
+    {
+      "key": "wc_revetement_sol",
+      "label": "WC revêtement de sol",
+      "category": "WC",
+      "description": "Diagnostic amiante pour le revêtement de sol des WC.",
+      "rag_keywords": ["wc", "toilettes", "sol", "revêtements de sols", "revetements de sols", "colle de carrelage", "carrelage"],
+      "postprocess_prompt": "Retourne exactement l'une des valeurs suivantes: Présence d'amiante, Absence d'amiante, Réserve, Absence d'informations. Retourne null si la colonne ne s'applique pas.",
+      "simple": false,
+      "builtin": true
+    },
+    {
+      "key": "cuisine_faience",
+      "label": "Cuisine Faïence",
+      "category": "Cuisine",
+      "description": "Diagnostic amiante pour la faïence ou sa colle dans la cuisine.",
+      "rag_keywords": ["cuisine", "faïence", "faience", "colle de faïence", "colle de faience", "revêtements de murs", "revetements de murs"],
+      "postprocess_prompt": "Retourne exactement l'une des valeurs suivantes: Présence d'amiante, Absence d'amiante, Réserve, Absence d'informations. Retourne null si la colonne ne s'applique pas.",
+      "simple": false,
+      "builtin": true
+    },
+    {
+      "key": "cuisine_enduits_murs",
+      "label": "Cuisine enduits murs",
+      "category": "Cuisine",
+      "description": "Diagnostic amiante pour les enduits ou revêtements muraux de la cuisine.",
+      "rag_keywords": ["cuisine", "enduit", "mur", "cloison", "revêtements de murs", "revetements de murs"],
+      "postprocess_prompt": "Retourne exactement l'une des valeurs suivantes: Présence d'amiante, Absence d'amiante, Réserve, Absence d'informations. Retourne null si la colonne ne s'applique pas.",
+      "simple": false,
+      "builtin": true
+    },
+    {
+      "key": "cuisine_enduits_plafonds",
+      "label": "Cuisine enduits plafonds",
+      "category": "Cuisine",
+      "description": "Diagnostic amiante pour les enduits ou revêtements de plafond de la cuisine.",
+      "rag_keywords": ["cuisine", "enduit", "plafond", "plafonds", "faux plafonds"],
+      "postprocess_prompt": "Retourne exactement l'une des valeurs suivantes: Présence d'amiante, Absence d'amiante, Réserve, Absence d'informations. Retourne null si la colonne ne s'applique pas.",
+      "simple": false,
+      "builtin": true
+    },
+    {
+      "key": "cuisine_revetement_sol",
+      "label": "Cuisine revêtement de sol",
+      "category": "Cuisine",
+      "description": "Diagnostic amiante pour le revêtement de sol de la cuisine.",
+      "rag_keywords": ["cuisine", "sol", "revêtements de sols", "revetements de sols", "colle de carrelage", "carrelage"],
+      "postprocess_prompt": "Retourne exactement l'une des valeurs suivantes: Présence d'amiante, Absence d'amiante, Réserve, Absence d'informations. Retourne null si la colonne ne s'applique pas.",
+      "simple": false,
+      "builtin": true
+    },
+    {
+      "key": "commentaire_amiex_1",
+      "label": "Commentaire Amiex",
+      "category": "Commentaires",
+      "description": "Premier commentaire utile et concis tiré du rapport.",
+      "rag_keywords": ["commentaire", "observation", "remarque", "conclusion", "amiante"],
+      "postprocess_prompt": "Retourne une remarque courte et utile. Pas de paragraphe réglementaire.",
+      "simple": false,
+      "builtin": true
+    },
+    {
+      "key": "commentaire_amiex_2",
+      "label": "Commentaire Amiex 2",
+      "category": "Commentaires",
+      "description": "Deuxième commentaire utile et concis tiré du rapport.",
+      "rag_keywords": ["commentaire", "observation", "remarque", "conclusion", "amiante"],
+      "postprocess_prompt": "Retourne une remarque courte et utile, différente si possible du commentaire 1.",
+      "simple": false,
+      "builtin": true
+    },
+    {
+      "key": "commentaire_amiex_3",
+      "label": "Commentaire Amiex 3",
+      "category": "Commentaires",
+      "description": "Troisième commentaire utile et concis tiré du rapport.",
+      "rag_keywords": ["commentaire", "observation", "remarque", "conclusion", "amiante"],
+      "postprocess_prompt": "Retourne une remarque courte et utile, différente si possible des commentaires précédents.",
+      "simple": false,
+      "builtin": true
+    }
+  ]
+}
