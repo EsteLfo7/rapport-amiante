@@ -5,7 +5,7 @@ use std::process::Command;
 use tauri::command;
 
 #[command]
-pub fn process_files(
+pub async fn process_files(
     paths: Vec<String>,
     mode: String,
     columns: Vec<String>,
@@ -21,26 +21,28 @@ pub fn process_files(
         "rapide" => "gemini",
         "precis" => "rag",
         other => other,
-    };
+    }.to_string(); 
 
     let columns_str = columns.join(",");
-    let mut cmd = Command::new(&python_bin);
+    let mut cmd = std::process::Command::new(&python_bin);
     cmd.current_dir(&project_root)
         .arg("-m")
         .arg("rapport_amiante.main")
         .arg("--mode")
-        .arg(python_mode)
+        .arg(&python_mode)
         .arg("--columns")
-        .arg(&columns_str);
-
-    cmd.arg("--files");
+        .arg(&columns_str)
+        .arg("--files");
     for path in &paths {
         cmd.arg(path);
     }
 
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Erreur lors du lancement de {python_bin}: {}", e))?;
+    let output = tokio::task::spawn_blocking(move || -> std::io::Result<std::process::Output> {
+        cmd.output()
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
+    .map_err(|e| format!("Erreur lors du lancement de {}: {}", python_bin, e))?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -79,16 +81,13 @@ fn find_python_bin() -> String {
     "python3".to_string()
 }
 
-/// Trouve le répertoire racine du projet (parent direct de rapport_amiante/).
-/// Cherche dans cet ordre : relatif depuis dev, remontée depuis cwd, exe bundlé.
 fn find_project_root() -> Option<PathBuf> {
-    // Dev : depuis app/src-tauri/ on remonte de 2 niveaux → racine du repo
+
     let dev_root = PathBuf::from("../../");
     if dev_root.join("rapport_amiante").join("main.py").exists() {
         return dev_root.canonicalize().ok();
     }
 
-    // Remontée générique depuis le répertoire courant (jusqu'à 6 niveaux)
     if let Ok(cwd) = std::env::current_dir() {
         let mut dir = cwd;
         for _ in 0..6 {
@@ -102,7 +101,6 @@ fn find_project_root() -> Option<PathBuf> {
         }
     }
 
-    // Production (exe bundlé) : répertoire de l'exécutable
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(dir) = exe_path.parent() {
             let bundled_root = dir.join("_internal");
