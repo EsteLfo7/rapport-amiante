@@ -80,10 +80,10 @@ Le frontend React communique avec le backend Python via une commande Tauri :
 
 ## Colonnes disponibles
 
-Les colonnes correspondent aux cles de `COLUMNS_FR` dans `rapport_amiante/variables/var.py`.
+Les colonnes sont centralisées dans `app/src/catalog/column_catalog.json`.
 
-### Simple (10 colonnes)
-`reference_rapport`, `date_rapport`, `operateur_reperage`, `prestataire`, `adresse`, `batiment`, `etage`, `porte`, `reserves`, `conclusion_presence_amiante`
+### Simple
+`No`, `Référence du rapport`, `Date du rapport`, `Opérateur de repérage`, `Prestataire`, `Adresse`, `Périmètre`, `Étage`, `Bâtiment`, `Réserves`, `Nbr de prélèvements`
 
-### Complet (25 colonnes)
-Toutes les colonnes du dictionnaire `COLUMNS_FR`.
+### Complet
+Toutes les colonnes du catalogue partagé, dans leur ordre métier.

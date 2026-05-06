@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Any
 
 import pdfplumber
 
@@ -79,6 +80,10 @@ def build_search_terms(column: ColumnDefinition) -> list[str]:
     return terms
 
 
+def find_matching_terms(text: str, search_terms: list[str]) -> list[str]:
+    return [term for term in search_terms if term in text]
+
+
 def score_window(window_text: str, search_terms: list[str]) -> int:
     score = 0
 
@@ -123,12 +128,41 @@ def retrieve_column_context(
     max_windows: int = RAG_MAX_WINDOWS_PER_COLUMN,
     max_characters: int = RAG_MAX_CONTEXT_CHARACTERS,
 ) -> str:
+    return retrieve_column_context_trace(
+        lines,
+        column,
+        window_radius=window_radius,
+        max_windows=max_windows,
+        max_characters=max_characters,
+    )["context"]
+
+
+def retrieve_column_context_trace(
+    lines: list[LineEntry],
+    column: ColumnDefinition,
+    *,
+    window_radius: int = RAG_WINDOW_RADIUS,
+    max_windows: int = RAG_MAX_WINDOWS_PER_COLUMN,
+    max_characters: int = RAG_MAX_CONTEXT_CHARACTERS,
+) -> dict[str, Any]:
     search_terms = build_search_terms(column)
-    candidate_windows: list[tuple[int, int, int]] = []
+    candidate_windows: list[dict[str, Any]] = []
+    matched_lines: list[dict[str, Any]] = []
 
     for line in lines:
-        if not any(term in line.normalized_text for term in search_terms):
+        matched_terms = find_matching_terms(line.normalized_text, search_terms)
+
+        if not matched_terms:
             continue
+
+        matched_lines.append(
+            {
+                "line_index": line.index,
+                "page_number": line.page_number,
+                "matched_terms": matched_terms,
+                "text": line.text,
+            }
+        )
 
         start_index = max(0, line.index - window_radius)
         end_index = min(len(lines), line.index + window_radius + 1)
@@ -138,19 +172,42 @@ def retrieve_column_context(
         if window_score <= 0:
             continue
 
-        candidate_windows.append((window_score, start_index, end_index))
+        candidate_windows.append(
+            {
+                "score": window_score,
+                "start_index": start_index,
+                "end_index": end_index,
+                "page_start": lines[start_index].page_number,
+                "page_end": lines[end_index - 1].page_number,
+                "matched_terms": matched_terms,
+                "text": "\n".join(lines[position].text for position in range(start_index, end_index)),
+            }
+        )
 
     if not candidate_windows:
         fallback_text = "\n".join(line.text for line in lines[: min(len(lines), 18)])
-        return fallback_text[:max_characters]
+        return {
+            "key": column.key,
+            "label": column.label,
+            "search_terms": search_terms,
+            "matched_lines_count": len(matched_lines),
+            "matched_lines": matched_lines[:60],
+            "candidate_windows_count": 0,
+            "candidate_windows": [],
+            "selected_windows": [],
+            "fallback_used": True,
+            "context_characters": len(fallback_text[:max_characters]),
+            "context": fallback_text[:max_characters],
+        }
 
-    candidate_windows.sort(key=lambda item: (-item[0], item[1], item[2]))
+    candidate_windows.sort(key=lambda item: (-item["score"], item["start_index"], item["end_index"]))
 
     selected_ranges = merge_ranges(
-        sorted((start_index, end_index) for _, start_index, end_index in candidate_windows[:max_windows])
+        sorted((item["start_index"], item["end_index"]) for item in candidate_windows[:max_windows])
     )
 
     contexts: list[str] = []
+    selected_windows: list[dict[str, Any]] = []
     total_length = 0
 
     for start_index, end_index in selected_ranges:
@@ -165,12 +222,43 @@ def retrieve_column_context(
             break
 
         contexts.append(block)
+        selected_windows.append(
+            {
+                "start_index": start_index,
+                "end_index": end_index,
+                "page_start": lines[start_index].page_number,
+                "page_end": lines[end_index - 1].page_number,
+                "text": block,
+            }
+        )
         total_length = next_length
 
-    return "\n\n---\n\n".join(contexts)[:max_characters]
+    context = "\n\n---\n\n".join(contexts)[:max_characters]
+
+    return {
+        "key": column.key,
+        "label": column.label,
+        "search_terms": search_terms,
+        "matched_lines_count": len(matched_lines),
+        "matched_lines": matched_lines[:60],
+        "candidate_windows_count": len(candidate_windows),
+        "candidate_windows": candidate_windows[:12],
+        "selected_windows": selected_windows,
+        "fallback_used": False,
+        "context_characters": len(context),
+        "context": context,
+    }
 
 
 def build_rag_context_from_text(full_text: str, columns: list[ColumnDefinition]) -> dict[str, str]:
+    contexts_by_column, _ = build_rag_context_trace_from_text(full_text, columns)
+    return contexts_by_column
+
+
+def build_rag_context_trace_from_text(
+    full_text: str,
+    columns: list[ColumnDefinition],
+) -> tuple[dict[str, str], dict[str, Any]]:
     lines: list[LineEntry] = []
     line_index = 0
 
@@ -190,9 +278,34 @@ def build_rag_context_from_text(full_text: str, columns: list[ColumnDefinition])
         )
         line_index += 1
 
-    return {column.key: retrieve_column_context(lines, column) for column in columns}
+    return build_rag_context_trace_from_lines(lines, columns, source_path=None)
 
 
 def build_rag_context(pdf_path: str, columns: list[ColumnDefinition]) -> dict[str, str]:
+    contexts_by_column, _ = build_rag_context_with_trace(pdf_path, columns)
+    return contexts_by_column
+
+
+def build_rag_context_with_trace(
+    pdf_path: str,
+    columns: list[ColumnDefinition],
+) -> tuple[dict[str, str], dict[str, Any]]:
     lines = extract_lines_from_pdf(pdf_path)
-    return {column.key: retrieve_column_context(lines, column) for column in columns}
+    return build_rag_context_trace_from_lines(lines, columns, source_path=pdf_path)
+
+
+def build_rag_context_trace_from_lines(
+    lines: list[LineEntry],
+    columns: list[ColumnDefinition],
+    *,
+    source_path: str | None,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    column_traces = [retrieve_column_context_trace(lines, column) for column in columns]
+    contexts_by_column = {trace["key"]: trace["context"] for trace in column_traces}
+
+    return contexts_by_column, {
+        "source_path": source_path,
+        "line_count": len(lines),
+        "page_count": max((line.page_number for line in lines), default=0),
+        "columns": column_traces,
+    }

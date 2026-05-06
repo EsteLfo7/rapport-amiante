@@ -56,6 +56,7 @@ def resolve_columns(
                     update={
                         "label": column.label or base_column.label,
                         "description": column.description or base_column.description,
+                        "expected_format": column.expected_format or base_column.expected_format,
                         "rag_keywords": column.rag_keywords or base_column.rag_keywords,
                         "postprocess_prompt": (
                             column.postprocess_prompt or base_column.postprocess_prompt

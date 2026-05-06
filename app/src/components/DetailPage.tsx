@@ -1,4 +1,5 @@
 import { BackendResponse, ProcessingState } from '../types';
+import { extractLogDeltaSeconds, stripLogTimingPrefix } from '../logs';
 
 interface Props {
   result: BackendResponse | null;
@@ -9,6 +10,17 @@ interface Props {
   onOpenOutput: () => void;
   onOpenFolder: () => void;
   onOpenRetouches: () => void;
+}
+
+type StageTone = 'error' | 'success' | 'processing';
+
+function CircleCheckIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" />
+      <path d="m8.5 12.5 2.5 2.5 4.8-5.2" />
+    </svg>
+  );
 }
 
 function formatElapsedSeconds(processingState: ProcessingState | null, result: BackendResponse | null): string {
@@ -25,6 +37,44 @@ function formatElapsedSeconds(processingState: ProcessingState | null, result: B
   return '0s';
 }
 
+function formatStageLabel(stage: string | undefined, processing: boolean, result: BackendResponse | null): string {
+  if (processing) {
+    return 'En cours';
+  }
+
+  if (stage === 'failed' || result?.success === false) {
+    return 'En erreur';
+  }
+
+  if (stage === 'done' || result?.success) {
+    return 'Terminé';
+  }
+
+  return stage ?? 'Idle';
+}
+
+function resolveStageTone(stage: string | undefined, processing: boolean, result: BackendResponse | null): StageTone {
+  if (processing) {
+    return 'processing';
+  }
+
+  if (stage === 'failed' || result?.success === false) {
+    return 'error';
+  }
+
+  return 'success';
+}
+
+function isSlowLogLine(message: string): boolean {
+  const deltaSeconds = extractLogDeltaSeconds(message);
+
+  if (deltaSeconds === null) {
+    return false;
+  }
+
+  return deltaSeconds >= 1;
+}
+
 export default function DetailPage({
   result,
   processing,
@@ -36,17 +86,24 @@ export default function DetailPage({
   onOpenRetouches,
 }: Props) {
   const title = processing ? 'Traitement en cours' : result?.success ? 'Export terminé' : 'Traitement';
-  const subtitle = processingState?.current.message ?? result?.message ?? 'Aucun traitement en cours';
+  const subtitle = stripLogTimingPrefix(processingState?.current.message ?? result?.message ?? 'Aucun traitement en cours');
   const canOpenFile = !!result?.output_path && !processing;
   const canRetouch = !!result?.output_path && !processing;
-  const history = processingState?.history ?? [];
+  const history = [...(processingState?.history ?? [])].reverse();
   const errors = result?.error_details ?? [];
+  const stageValue = processingState?.current.stage;
+  const stageLabel = formatStageLabel(stageValue, processing, result);
+  const stageTone = resolveStageTone(stageValue, processing, result);
+  const titleTone = processing ? 'processing' : result?.success ? 'success' : 'error';
 
   return (
     <div className="workflow-page">
       <div className="workflow-header">
-        <div>
-          <h2>{title}</h2>
+        <div className="page-heading">
+          <div className={`page-title-row ${titleTone}`}>
+            <span className="page-title-icon"><CircleCheckIcon /></span>
+            <h2>{title}</h2>
+          </div>
           <p>{subtitle}</p>
         </div>
         <div className="workflow-header-actions">
@@ -57,8 +114,13 @@ export default function DetailPage({
 
       <div className="detail-fixed-block">
         <div className="path-block path-block-fixed">
-          <span>Fichier Excel exporté</span>
-          <code>{result?.output_path ?? 'Le chemin apparaîtra quand le fichier sera généré.'}</code>
+          <span className="section-label">Fichier Excel exporté</span>
+          <input
+            className="path-input"
+            readOnly
+            value={result?.output_path ?? 'Le chemin apparaîtra quand le fichier sera généré.'}
+            title={result?.output_path ?? ''}
+          />
         </div>
 
         <div className="detail-actions-fixed">
@@ -77,20 +139,20 @@ export default function DetailPage({
 
         <div className="result-metrics">
           <div className="metric-pill">
-            <span>Temps écoulé</span>
+            <span className="section-label">Temps écoulé</span>
             <strong>{formatElapsedSeconds(processingState, result)}</strong>
           </div>
           <div className="metric-pill">
-            <span>Fichiers traités</span>
+            <span className="section-label">Fichiers traités</span>
             <strong>{result?.processed_count ?? processingState?.current.processed_count ?? 0}</strong>
           </div>
           <div className="metric-pill">
-            <span>Erreurs</span>
+            <span className="section-label">Erreurs</span>
             <strong>{result?.error_count ?? processingState?.current.error_count ?? 0}</strong>
           </div>
           <div className="metric-pill">
-            <span>Étape</span>
-            <strong>{processingState?.current.stage ?? 'idle'}</strong>
+            <span className="section-label">Étape</span>
+            <div className={`status-badge ${stageTone}`}>{stageLabel}</div>
           </div>
         </div>
       </div>
@@ -98,21 +160,23 @@ export default function DetailPage({
       <div className="detail-scroll-zone">
         <div className="result-card">
           <h3>Détails de l&apos;avancement</h3>
-          <div className="timeline-list">
-            {history.length === 0 ? (
-              <div className="empty-state">Aucun détail disponible pour le moment.</div>
-            ) : (
-              history.map((entry) => (
-                <div key={entry.id} className="timeline-item">
-                  <span className="timeline-stage">{entry.stage}</span>
-                  <div>
-                    <strong>{entry.message}</strong>
-                    {entry.file_name && <p>{entry.file_name}</p>}
-                    {entry.error_detail && <p>{entry.error_detail}</p>}
+          <div className="timeline-panel">
+            <div className="timeline-list">
+              {history.length === 0 ? (
+                <div className="empty-state">Aucun détail disponible pour le moment.</div>
+              ) : (
+                history.map((entry) => (
+                  <div key={entry.id} className={`timeline-item ${isSlowLogLine(entry.message) ? 'log-slow' : ''}`}>
+                    <span className={`timeline-stage ${entry.stage.toLowerCase()}`}>{entry.stage}</span>
+                    <div className="timeline-content">
+                      <strong>{stripLogTimingPrefix(entry.message)}</strong>
+                      {entry.file_name && <p className="timeline-file">{entry.file_name}</p>}
+                      {entry.error_detail && <p>{entry.error_detail}</p>}
+                    </div>
                   </div>
-                </div>
-              ))
-            )}
+                ))
+              )}
+            </div>
           </div>
         </div>
 

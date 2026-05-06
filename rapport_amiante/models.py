@@ -15,6 +15,7 @@ class ColumnDefinition(BaseModel):
     key: str
     label: str
     description: str
+    expected_format: str = "Texte"
     rag_keywords: list[str] = Field(default_factory=list)
     postprocess_prompt: str = ""
     category: str = "Personnalise"
@@ -96,6 +97,7 @@ class BackendResponse(BaseModel):
     output_dir: str | None = None
     manifest_path: str | None = None
     log_path: str | None = None
+    mode: Literal["gemini", "rag"] | None = None
     processed_count: int = 0
     error_count: int = 0
     duration_seconds: float = 0.0
@@ -127,6 +129,7 @@ def build_response_model(columns: list[ColumnDefinition]) -> type[BaseModel]:
                     for part in (
                         column.label,
                         column.description,
+                        f"Format attendu: {column.expected_format}",
                         column.postprocess_prompt,
                     )
                     if part

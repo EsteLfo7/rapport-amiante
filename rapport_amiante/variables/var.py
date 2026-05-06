@@ -1,6 +1,7 @@
-# MODEL = "gemini-2.5-pro"
-MODEL = "gemini-2.5-flash"
-RAG_POSTPROCESS_MODEL = "gemini-2.5-flash"
+import os
+
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-preview-04-17")
+RAG_POSTPROCESS_MODEL = os.getenv("RAG_POSTPROCESS_MODEL", MODEL)
 
 MODE_GEMINI = "gemini"
 MODE_RAG = "rag"

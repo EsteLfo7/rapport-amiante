@@ -1,5 +1,8 @@
 import { ColumnDefinition } from './columns';
 
+export type ProcessingMode = 'rapide' | 'precis';
+export type BackendMode = 'gemini' | 'rag';
+
 export interface BackendResponse {
   success: boolean;
   message: string;
@@ -7,6 +10,7 @@ export interface BackendResponse {
   output_dir: string | null;
   manifest_path: string | null;
   log_path: string | null;
+  mode: BackendMode | null;
   processed_count: number;
   error_count: number;
   duration_seconds: number;
@@ -41,4 +45,11 @@ export interface PendingRetouch {
   outputPath: string;
   manifestPath: string;
   columns: ColumnDefinition[];
+}
+
+export interface ColumnConfigDraft {
+  orderedBuiltinColumns: ColumnDefinition[];
+  selectedBuiltinKeys: string[];
+  customColumns: ColumnDefinition[];
+  selectedCustomKeys: string[];
 }

@@ -7,10 +7,11 @@ from pathlib import Path
 from google.genai import types
 
 from ..models import ColumnDefinition, build_response_model
-from ..variables.prompt import build_document_prompt
+from ..variables.prompt import build_document_prompt, build_rag_postprocess_prompt
 from ..variables.var import MODEL, RAG_POSTPROCESS_MODEL
 from .llm_client import generate_structured_output
-from .rag_extractor import build_rag_context
+from .rag_debug import write_rag_debug_export
+from .rag_extractor import build_rag_context_with_trace
 from .rag_postprocess import postprocess_rag
 
 ProgressCallback = Callable[[str, str], None]
@@ -41,9 +42,10 @@ def extract_rapport(
         )
 
     if progress_callback is not None:
-        progress_callback("gemini_prepare", "Envoi du PDF au moteur précis")
+        progress_callback("gemini_prepare", "Préparation du prompt et du PDF pour le moteur précis")
+        progress_callback("llm_start", "Démarrage de l'appel Gemini direct")
 
-    return generate_structured_output(
+    response_row = generate_structured_output(
         model=model,
         contents=[
             types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
@@ -52,6 +54,11 @@ def extract_rapport(
         response_schema=response_schema,
         logger=logger,
     )
+
+    if progress_callback is not None:
+        progress_callback("llm_done", "Réponse Gemini directe reçue")
+
+    return response_row
 
 
 def extract_rapport_rag(
@@ -75,16 +82,44 @@ def extract_rapport_rag(
         )
 
     if progress_callback is not None:
-        progress_callback("rag_extract", "Extraction du texte et recherche ciblée")
+        progress_callback("rag_extract", "Extraction du texte du PDF")
+        progress_callback("retrieval", "Récupération des extraits pertinents")
 
-    contexts_by_column = build_rag_context(str(pdf_file), columns)
+    contexts_by_column, extraction_trace = build_rag_context_with_trace(str(pdf_file), columns)
 
     if progress_callback is not None:
-        progress_callback("rag_postprocess", "Structuration des colonnes à partir des extraits RAG")
+        progress_callback("reranking", "Classement des extraits RAG")
+        progress_callback("rag_postprocess", "Préparation du prompt de post-traitement RAG")
 
-    return postprocess_rag(
+    postprocess_prompt = build_rag_postprocess_prompt(columns, contexts_by_column)
+
+    write_rag_debug_export(
+        pdf_path=str(pdf_file),
+        extraction_trace=extraction_trace,
+        postprocess_prompt=postprocess_prompt,
+        response_row=None,
+        logger=logger,
+    )
+
+    if progress_callback is not None:
+        progress_callback("llm_start", "Démarrage de l'appel LLM de post-traitement RAG")
+
+    response_row = postprocess_rag(
         columns=columns,
         contexts_by_column=contexts_by_column,
         model=model,
         logger=logger,
     )
+
+    if progress_callback is not None:
+        progress_callback("llm_done", "Réponse du post-traitement RAG reçue")
+
+    write_rag_debug_export(
+        pdf_path=str(pdf_file),
+        extraction_trace=extraction_trace,
+        postprocess_prompt=postprocess_prompt,
+        response_row=response_row,
+        logger=logger,
+    )
+
+    return response_row

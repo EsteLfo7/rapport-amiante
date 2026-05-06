@@ -4,6 +4,7 @@ export interface ColumnDefinition {
   key: string;
   label: string;
   description: string;
+  expected_format: string;
   rag_keywords: string[];
   postprocess_prompt: string;
   category: string;
@@ -29,6 +30,14 @@ export const COLUMNS_BY_KEY: Record<string, ColumnDefinition> = Object.fromEntri
   AVAILABLE_COLUMNS.map((column) => [column.key, column]),
 );
 
+export function getSimpleColumns(columns: ColumnDefinition[]): ColumnDefinition[] {
+  return columns.filter((column) => column.simple).map(cloneColumn);
+}
+
+export function getCompleteColumns(columns: ColumnDefinition[]): ColumnDefinition[] {
+  return columns.map(cloneColumn);
+}
+
 export function cloneColumn(column: ColumnDefinition): ColumnDefinition {
   return {
     ...column,
@@ -45,6 +54,15 @@ export function slugifyColumnKey(label: string): string {
     .replace(/^_+|_+$/g, '');
 }
 
+export function buildCatalogKeyword(label: string): string {
+  return slugifyColumnKey(label);
+}
+
+export function buildCatalogKeywords(label: string): string[] {
+  const keyword = buildCatalogKeyword(label);
+  return keyword ? [keyword] : [];
+}
+
 export function parseKeywords(value: string): string[] {
   return value
     .split(',')
@@ -58,17 +76,20 @@ export function keywordsToText(keywords: string[]): string {
 
 export function createCustomColumnDefinition(input: {
   label: string;
-  description: string;
-  rag_keywords: string[];
-  postprocess_prompt: string;
+  description?: string;
+  expected_format?: string;
+  category?: string;
+  rag_keywords?: string[];
+  postprocess_prompt?: string;
 }): ColumnDefinition {
   return {
     key: slugifyColumnKey(input.label),
     label: input.label.trim(),
-    description: input.description.trim(),
-    rag_keywords: [...input.rag_keywords],
-    postprocess_prompt: input.postprocess_prompt.trim(),
-    category: 'Personnalise',
+    description: input.description?.trim() || input.label.trim(),
+    expected_format: input.expected_format?.trim() || 'Texte',
+    rag_keywords: [...(input.rag_keywords ?? buildCatalogKeywords(input.label))],
+    postprocess_prompt: input.postprocess_prompt?.trim() || '',
+    category: input.category?.trim() || 'Personnalise',
     simple: false,
     builtin: false,
   };

@@ -60,5 +60,10 @@ def build_log_path(prefix: str, timestamp: str | None = None) -> Path:
     return build_log_directory(current_timestamp[:8]) / f"{prefix}_{current_timestamp}.log"
 
 
+def build_rag_debug_directory(timestamp: str | None = None) -> Path:
+    current_timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+    return build_log_directory(current_timestamp[:8]) / f"rag_{current_timestamp}"
+
+
 def shared_column_catalog_path() -> Path:
     return resolve_project_path(*COLUMN_CATALOG_DIRECTORY, COLUMN_CATALOG_FILENAME)

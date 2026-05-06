@@ -10,7 +10,12 @@ from time import perf_counter
 from dotenv import load_dotenv
 
 from .catalog import resolve_columns
-from .engine.export import build_dataframe, export_excel, read_export_dataframe
+from .engine.export import (
+    build_dataframe,
+    export_excel,
+    normalize_extracted_row,
+    read_export_dataframe,
+)
 from .engine.inference import extract_rapport, extract_rapport_rag
 from .logging_utils import configure_run_logger
 from .models import (
@@ -27,6 +32,31 @@ from .variables.var import MODE_GEMINI, MODE_RAG, VALID_MODES
 
 
 load_dotenv()
+
+
+class ProgressEmitter:
+    def __init__(self, *, started_at: float, stream_events: bool) -> None:
+        self.started_at = started_at
+        self.stream_events = stream_events
+        self.previous_at = started_at
+
+    def emit(self, payload: ProgressPayload) -> None:
+        if not self.stream_events:
+            return
+
+        current_at = perf_counter()
+        elapsed_seconds = current_at - self.started_at
+        delta_seconds = current_at - self.previous_at
+        self.previous_at = current_at
+
+        emit_progress(
+            payload.model_copy(
+                update={
+                    "message": f"[+{elapsed_seconds:.3f}s | Δ{delta_seconds:.3f}s] {payload.message}",
+                }
+            ),
+            self.stream_events,
+        )
 
 
 def write_response(response: BackendResponse, stream_events: bool) -> None:
@@ -146,6 +176,7 @@ def process_request(
     stream_events: bool,
 ) -> BackendResponse:
     started_at = perf_counter()
+    progress_emitter = ProgressEmitter(started_at=started_at, stream_events=stream_events)
     logger, log_path = configure_run_logger(prefix="process", timestamp=timestamp)
     columns = resolve_columns(requested_columns=request.columns)
     pdf_files = resolve_pdf_paths(request.pdf_paths)
@@ -159,7 +190,21 @@ def process_request(
         len(columns),
     )
 
+    progress_emitter.emit(
+        ProgressPayload(
+            stage="starting",
+            message=f"Requête reçue | mode={request.mode} | fichiers={total_files} | colonnes={len(columns)}",
+            total_files=total_files,
+        )
+    )
+
     if not pdf_files:
+        progress_emitter.emit(
+            ProgressPayload(
+                stage="failed",
+                message=f"Aucun PDF valide à traiter. Durée totale {perf_counter() - started_at:.3f}s",
+            )
+        )
         return BackendResponse(
             success=False,
             message="Aucun PDF valide à traiter.",
@@ -168,13 +213,12 @@ def process_request(
             columns=columns,
         )
 
-    emit_progress(
+    progress_emitter.emit(
         ProgressPayload(
             stage="starting",
             message=f"Préparation du traitement de {total_files} fichier(s)",
             total_files=total_files,
-        ),
-        stream_events,
+        )
     )
 
     extractor = select_extractor(request.mode)
@@ -184,7 +228,7 @@ def process_request(
 
     for file_index, pdf_file in enumerate(pdf_files, start=1):
         def progress_callback(stage: str, message: str) -> None:
-            emit_progress(
+            progress_emitter.emit(
                 ProgressPayload(
                     stage=stage,
                     message=message,
@@ -193,11 +237,10 @@ def process_request(
                     processed_count=len(rows),
                     error_count=len(errors),
                     file_name=pdf_file.name,
-                ),
-                stream_events,
+                )
             )
 
-        emit_progress(
+        progress_emitter.emit(
             ProgressPayload(
                 stage="file_start",
                 message=f"Analyse du fichier {file_index}/{total_files} : {pdf_file.name}",
@@ -206,8 +249,7 @@ def process_request(
                 processed_count=len(rows),
                 error_count=len(errors),
                 file_name=pdf_file.name,
-            ),
-            stream_events,
+            )
         )
 
         try:
@@ -217,6 +259,8 @@ def process_request(
                 logger=logger,
                 progress_callback=progress_callback,
             )
+            progress_callback("formatting", "Normalisation des données extraites")
+            row = normalize_extracted_row(row, columns, row_number=file_index)
             rows.append(row)
             documents.append(
                 DocumentRecord(
@@ -226,7 +270,7 @@ def process_request(
                 )
             )
             logger.info("Extraction réussie | fichier=%s", pdf_file.name)
-            emit_progress(
+            progress_emitter.emit(
                 ProgressPayload(
                     stage="file_done",
                     message=f"Fichier {file_index}/{total_files} traité avec succès",
@@ -235,15 +279,14 @@ def process_request(
                     processed_count=len(rows),
                     error_count=len(errors),
                     file_name=pdf_file.name,
-                ),
-                stream_events,
+                )
             )
 
         except Exception as error:
             if request.mode == MODE_GEMINI and should_fallback_to_rag(error):
                 fallback_count += 1
                 logger.warning("Bascule automatique vers le mode RAG | fichier=%s", pdf_file.name)
-                emit_progress(
+                progress_emitter.emit(
                     ProgressPayload(
                         stage="fallback_rag",
                         message=f"Moteur précis indisponible, bascule RAG sur {pdf_file.name}",
@@ -253,8 +296,7 @@ def process_request(
                         error_count=len(errors),
                         file_name=pdf_file.name,
                         error_detail=str(error),
-                    ),
-                    stream_events,
+                    )
                 )
 
                 try:
@@ -264,6 +306,8 @@ def process_request(
                         logger=logger,
                         progress_callback=progress_callback,
                     )
+                    progress_callback("formatting", "Normalisation des données extraites")
+                    row = normalize_extracted_row(row, columns, row_number=file_index)
                     rows.append(row)
                     documents.append(
                         DocumentRecord(
@@ -273,7 +317,7 @@ def process_request(
                         )
                     )
                     logger.info("Extraction de secours RAG réussie | fichier=%s", pdf_file.name)
-                    emit_progress(
+                    progress_emitter.emit(
                         ProgressPayload(
                             stage="file_done",
                             message=f"Fichier {file_index}/{total_files} traité via RAG de secours",
@@ -282,15 +326,14 @@ def process_request(
                             processed_count=len(rows),
                             error_count=len(errors),
                             file_name=pdf_file.name,
-                        ),
-                        stream_events,
+                        )
                     )
                     continue
 
                 except Exception as fallback_error:
                     errors.append(f"{pdf_file.name}: {fallback_error}")
                     logger.exception("Echec extraction de secours | fichier=%s", pdf_file.name)
-                    emit_progress(
+                    progress_emitter.emit(
                         ProgressPayload(
                             stage="file_error",
                             message=f"Echec du fichier {file_index}/{total_files}",
@@ -300,14 +343,13 @@ def process_request(
                             error_count=len(errors),
                             file_name=pdf_file.name,
                             error_detail=str(fallback_error),
-                        ),
-                        stream_events,
+                        )
                     )
                     continue
 
             errors.append(f"{pdf_file.name}: {error}")
             logger.exception("Echec extraction | fichier=%s", pdf_file.name)
-            emit_progress(
+            progress_emitter.emit(
                 ProgressPayload(
                     stage="file_error",
                     message=f"Echec du fichier {file_index}/{total_files}",
@@ -317,11 +359,20 @@ def process_request(
                     error_count=len(errors),
                     file_name=pdf_file.name,
                     error_detail=str(error),
-                ),
-                stream_events,
+                )
             )
 
     if not rows:
+        progress_emitter.emit(
+            ProgressPayload(
+                stage="failed",
+                message=f"Aucun rapport traité. Durée totale {perf_counter() - started_at:.3f}s",
+                total_files=total_files,
+                current_file_index=total_files,
+                processed_count=0,
+                error_count=len(errors),
+            )
+        )
         return BackendResponse(
             success=False,
             message="Aucun rapport n'a pu être traité.",
@@ -333,7 +384,18 @@ def process_request(
             columns=columns,
         )
 
-    emit_progress(
+    progress_emitter.emit(
+        ProgressPayload(
+            stage="formatting",
+            message="Mise en forme des résultats pour l'export",
+            total_files=total_files,
+            current_file_index=total_files,
+            processed_count=len(rows),
+            error_count=len(errors),
+        )
+    )
+
+    progress_emitter.emit(
         ProgressPayload(
             stage="exporting",
             message="Création du fichier Excel et du manifeste",
@@ -341,14 +403,13 @@ def process_request(
             current_file_index=total_files,
             processed_count=len(rows),
             error_count=len(errors),
-        ),
-        stream_events,
+        )
     )
 
     dataframe = build_dataframe(rows=rows, columns=columns)
     output_path = build_output_path(timestamp)
     manifest_path = build_manifest_path(output_path)
-    export_excel(dataframe, str(output_path))
+    export_excel(dataframe, str(output_path), columns=columns)
 
     manifest = ExportManifest(
         created_at=timestamp,
@@ -375,6 +436,17 @@ def process_request(
     if fallback_count:
         message = f"{message}, {fallback_count} bascule(s) RAG"
 
+    progress_emitter.emit(
+        ProgressPayload(
+            stage="done",
+            message=f"Traitement terminé. Durée totale {perf_counter() - started_at:.3f}s",
+            total_files=total_files,
+            current_file_index=total_files,
+            processed_count=len(rows),
+            error_count=len(errors),
+        )
+    )
+
     return BackendResponse(
         success=True,
         message=message,
@@ -382,6 +454,7 @@ def process_request(
         output_dir=str(output_path.parent),
         manifest_path=str(manifest_path),
         log_path=str(log_path),
+        mode=request.mode,
         processed_count=len(rows),
         error_count=len(errors),
         duration_seconds=round(perf_counter() - started_at, 2),
@@ -397,6 +470,7 @@ def refine_request(
     stream_events: bool,
 ) -> BackendResponse:
     started_at = perf_counter()
+    progress_emitter = ProgressEmitter(started_at=started_at, stream_events=stream_events)
     logger, log_path = configure_run_logger(prefix="refine", timestamp=timestamp)
     manifest = load_manifest(request.manifest_path)
     updated_columns = resolve_columns(requested_columns=request.columns)
@@ -415,13 +489,20 @@ def refine_request(
         len(manifest.documents),
     )
 
-    emit_progress(
+    progress_emitter.emit(
+        ProgressPayload(
+            stage="starting",
+            message=f"Requête de retouche reçue | mode={manifest.mode} | fichiers={total_files} | colonnes={len(updated_columns)}",
+            total_files=total_files,
+        )
+    )
+
+    progress_emitter.emit(
         ProgressPayload(
             stage="starting",
             message=f"Préparation de la retouche sur {total_files} fichier(s)",
             total_files=total_files,
-        ),
-        stream_events,
+        )
     )
 
     for column in updated_columns:
@@ -435,7 +516,7 @@ def refine_request(
 
     for file_index, document in enumerate(manifest.documents, start=1):
         def progress_callback(stage: str, message: str) -> None:
-            emit_progress(
+            progress_emitter.emit(
                 ProgressPayload(
                     stage=stage,
                     message=message,
@@ -444,11 +525,10 @@ def refine_request(
                     processed_count=updated_count,
                     error_count=len(errors),
                     file_name=document.pdf_name,
-                ),
-                stream_events,
+                )
             )
 
-        emit_progress(
+        progress_emitter.emit(
             ProgressPayload(
                 stage="file_start",
                 message=f"Retouche du fichier {file_index}/{total_files} : {document.pdf_name}",
@@ -457,8 +537,7 @@ def refine_request(
                 processed_count=updated_count,
                 error_count=len(errors),
                 file_name=document.pdf_name,
-            ),
-            stream_events,
+            )
         )
 
         try:
@@ -468,13 +547,19 @@ def refine_request(
                 logger=logger,
                 progress_callback=progress_callback,
             )
+            progress_callback("formatting", "Normalisation des données retouchées")
+            refreshed_row = normalize_extracted_row(
+                refreshed_row,
+                updated_columns,
+                row_number=document.row_index + 1,
+            )
 
             for column in updated_columns:
                 dataframe.loc[document.row_index, column.label] = refreshed_row.get(column.key)
 
             updated_count += 1
             logger.info("Retouche réussie | fichier=%s", document.pdf_name)
-            emit_progress(
+            progress_emitter.emit(
                 ProgressPayload(
                     stage="file_done",
                     message=f"Retouche terminée pour {document.pdf_name}",
@@ -483,14 +568,13 @@ def refine_request(
                     processed_count=updated_count,
                     error_count=len(errors),
                     file_name=document.pdf_name,
-                ),
-                stream_events,
+                )
             )
 
         except Exception as error:
             errors.append(f"{document.pdf_name}: {error}")
             logger.exception("Echec retouche | fichier=%s", document.pdf_name)
-            emit_progress(
+            progress_emitter.emit(
                 ProgressPayload(
                     stage="file_error",
                     message=f"Echec de la retouche sur {document.pdf_name}",
@@ -500,15 +584,25 @@ def refine_request(
                     error_count=len(errors),
                     file_name=document.pdf_name,
                     error_detail=str(error),
-                ),
-                stream_events,
+                )
             )
 
     ordered_labels = [column.label for column in merged_columns]
     remaining_labels = [label for label in dataframe.columns if label not in ordered_labels]
     dataframe = dataframe[ordered_labels + remaining_labels]
 
-    emit_progress(
+    progress_emitter.emit(
+        ProgressPayload(
+            stage="formatting",
+            message="Mise en forme des lignes retouchées pour l'export",
+            total_files=total_files,
+            current_file_index=total_files,
+            processed_count=updated_count,
+            error_count=len(errors),
+        )
+    )
+
+    progress_emitter.emit(
         ProgressPayload(
             stage="exporting",
             message="Mise à jour du fichier Excel",
@@ -516,11 +610,10 @@ def refine_request(
             current_file_index=total_files,
             processed_count=updated_count,
             error_count=len(errors),
-        ),
-        stream_events,
+        )
     )
 
-    export_excel(dataframe, request.output_path)
+    export_excel(dataframe, request.output_path, columns=merged_columns)
 
     refreshed_manifest = manifest.model_copy(update={"columns": merged_columns, "output_path": request.output_path})
     write_manifest(refreshed_manifest, Path(request.manifest_path).expanduser().resolve())
@@ -530,6 +623,17 @@ def refine_request(
     if errors:
         message = f"{message}, {len(errors)} erreur(s)"
 
+    progress_emitter.emit(
+        ProgressPayload(
+            stage="done",
+            message=f"Retouche terminée. Durée totale {perf_counter() - started_at:.3f}s",
+            total_files=total_files,
+            current_file_index=total_files,
+            processed_count=updated_count,
+            error_count=len(errors),
+        )
+    )
+
     return BackendResponse(
         success=updated_count > 0,
         message=message,
@@ -537,6 +641,7 @@ def refine_request(
         output_dir=str(Path(request.output_path).expanduser().resolve().parent),
         manifest_path=request.manifest_path,
         log_path=str(log_path),
+        mode=manifest.mode,
         processed_count=updated_count,
         error_count=len(errors),
         duration_seconds=round(perf_counter() - started_at, 2),

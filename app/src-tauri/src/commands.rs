@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
@@ -12,6 +13,7 @@ pub struct ColumnDefinition {
     pub key: String,
     pub label: String,
     pub description: String,
+    pub expected_format: String,
     pub rag_keywords: Vec<String>,
     pub postprocess_prompt: String,
     pub category: String,
@@ -55,6 +57,7 @@ pub struct BackendResponse {
     pub output_dir: Option<String>,
     pub manifest_path: Option<String>,
     pub log_path: Option<String>,
+    pub mode: Option<String>,
     pub processed_count: usize,
     pub error_count: usize,
     pub duration_seconds: f64,
@@ -67,6 +70,12 @@ pub struct BackendResponse {
 enum BackendStreamEvent {
     Progress(ProgressPayload),
     Result(BackendResponse),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ColumnCatalogPayload {
+    version: u64,
+    columns: Vec<ColumnDefinition>,
 }
 
 #[command]
@@ -123,6 +132,92 @@ pub fn open_export_target(path: String, reveal_in_finder: bool) -> Result<(), St
     }
 
     open_with_system(&target_path, reveal_in_finder)
+}
+
+#[command]
+pub fn load_column_catalog() -> Result<Vec<ColumnDefinition>, String> {
+    Ok(read_column_catalog_payload()?.columns)
+}
+
+#[command]
+pub fn update_column_catalog_column(
+    previous_key: Option<String>,
+    column: ColumnDefinition,
+) -> Result<Vec<ColumnDefinition>, String> {
+    let mut payload = read_column_catalog_payload()?;
+    let target_key = previous_key.unwrap_or_else(|| column.key.clone());
+
+    let index = payload
+        .columns
+        .iter()
+        .position(|existing| existing.key == target_key)
+        .or_else(|| payload.columns.iter().position(|existing| existing.key == column.key));
+
+    if let Some(index) = index {
+        payload.columns[index] = column;
+    } else {
+        payload.columns.push(column);
+    }
+
+    write_column_catalog_payload(&payload)?;
+    Ok(payload.columns)
+}
+
+#[command]
+pub fn update_column_catalog_order(column_keys: Vec<String>) -> Result<Vec<ColumnDefinition>, String> {
+    let mut payload = read_column_catalog_payload()?;
+    let current_columns = payload.columns.clone();
+    let mut next_columns: Vec<ColumnDefinition> = Vec::with_capacity(current_columns.len());
+    let mut seen_keys: HashSet<String> = HashSet::new();
+
+    for key in column_keys {
+        if !seen_keys.insert(key.clone()) {
+            continue;
+        }
+
+        if let Some(column) = current_columns.iter().find(|existing| existing.key == key) {
+            next_columns.push(column.clone());
+        }
+    }
+
+    for column in current_columns {
+        if seen_keys.insert(column.key.clone()) {
+            next_columns.push(column);
+        }
+    }
+
+    payload.columns = next_columns;
+    write_column_catalog_payload(&payload)?;
+    Ok(payload.columns)
+}
+
+#[command]
+pub fn load_google_ai_studio_api_key() -> Result<String, String> {
+    Ok(read_env_value_from_env_file("GEMINI_API_KEY")?.unwrap_or_default())
+}
+
+#[command]
+pub fn save_google_ai_studio_api_key(api_key: String) -> Result<(), String> {
+    write_env_value("GEMINI_API_KEY", api_key.trim())
+}
+
+#[command]
+pub fn load_google_ai_studio_model() -> Result<String, String> {
+    Ok(read_env_value_from_env_file("GEMINI_MODEL")?
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "gemini-2.5-flash-preview-04-17".to_string()))
+}
+
+#[command]
+pub fn save_google_ai_studio_model(model: String) -> Result<(), String> {
+    let normalized_model = model.trim();
+
+    if normalized_model.is_empty() {
+        return Err("Le modèle Gemini ne peut pas être vide.".to_string());
+    }
+
+    write_env_value("GEMINI_MODEL", normalized_model)?;
+    write_env_value("RAG_POSTPROCESS_MODEL", normalized_model)
 }
 
 async fn run_backend_request<T: Serialize>(
@@ -253,6 +348,145 @@ fn write_request_file<T: Serialize>(request: &T) -> Result<PathBuf, String> {
         .map_err(|error| format!("Impossible d'écrire la requête temporaire: {error}"))?;
 
     Ok(request_path)
+}
+
+fn column_catalog_path() -> Result<PathBuf, String> {
+    let project_root =
+        find_project_root().ok_or_else(|| "Impossible de trouver la racine du projet".to_string())?;
+    let catalog_path = project_root
+        .join("app")
+        .join("src")
+        .join("catalog")
+        .join("column_catalog.json");
+
+    if !catalog_path.exists() {
+        return Err(format!(
+            "Le catalogue des colonnes est introuvable: {}",
+            catalog_path.display()
+        ));
+    }
+
+    Ok(catalog_path)
+}
+
+fn read_column_catalog_payload() -> Result<ColumnCatalogPayload, String> {
+    let catalog_path = column_catalog_path()?;
+    let payload = fs::read_to_string(&catalog_path).map_err(|error| {
+        format!(
+            "Impossible de lire le catalogue des colonnes {}: {error}",
+            catalog_path.display()
+        )
+    })?;
+
+    serde_json::from_str::<ColumnCatalogPayload>(&payload).map_err(|error| {
+        format!(
+            "Impossible de parser le catalogue des colonnes {}: {error}",
+            catalog_path.display()
+        )
+    })
+}
+
+fn write_column_catalog_payload(payload: &ColumnCatalogPayload) -> Result<(), String> {
+    let catalog_path = column_catalog_path()?;
+    let serialized_payload = serde_json::to_string_pretty(payload)
+        .map_err(|error| format!("Impossible de sérialiser le catalogue des colonnes: {error}"))?;
+
+    fs::write(&catalog_path, format!("{serialized_payload}\n")).map_err(|error| {
+        format!(
+            "Impossible d'écrire le catalogue des colonnes {}: {error}",
+            catalog_path.display()
+        )
+    })
+}
+
+fn backend_env_path() -> Result<PathBuf, String> {
+    let project_root =
+        find_project_root().ok_or_else(|| "Impossible de trouver la racine du projet".to_string())?;
+
+    Ok(project_root.join(".env"))
+}
+
+fn read_env_value_from_env_file(key: &str) -> Result<Option<String>, String> {
+    let env_path = backend_env_path()?;
+
+    if !env_path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(&env_path).map_err(|error| {
+        format!(
+            "Impossible de lire le fichier de configuration {}: {error}",
+            env_path.display()
+        )
+    })?;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        if let Some(value) = trimmed.strip_prefix(&format!("{key}=")) {
+            let normalized_value = value.trim().trim_matches('"').trim_matches('\'');
+            return Ok(Some(normalized_value.to_string()));
+        }
+    }
+
+    Ok(None)
+}
+
+fn write_env_value(key: &str, value: &str) -> Result<(), String> {
+    let env_path = backend_env_path()?;
+    let existing_content = if env_path.exists() {
+        fs::read_to_string(&env_path).map_err(|error| {
+            format!(
+                "Impossible de lire le fichier de configuration {}: {error}",
+                env_path.display()
+            )
+        })?
+    } else {
+        String::new()
+    };
+
+    let mut next_lines: Vec<String> = Vec::new();
+    let mut found = false;
+    let prefix = format!("{key}=");
+
+    for line in existing_content.lines() {
+        let trimmed = line.trim_start();
+
+        if trimmed.starts_with(&prefix) {
+            if !found {
+                if !value.is_empty() {
+                    next_lines.push(format!("{key}={value}"));
+                }
+
+                found = true;
+            }
+
+            continue;
+        }
+
+        next_lines.push(line.to_string());
+    }
+
+    if !found && !value.is_empty() {
+        next_lines.push(format!("{key}={value}"));
+    }
+
+    let serialized = if next_lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", next_lines.join("\n"))
+    };
+
+    fs::write(&env_path, serialized).map_err(|error| {
+        format!(
+            "Impossible d'écrire le fichier de configuration {}: {error}",
+            env_path.display()
+        )
+    })
 }
 
 fn find_python_bin() -> String {

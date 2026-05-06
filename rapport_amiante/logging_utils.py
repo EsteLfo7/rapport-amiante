@@ -24,4 +24,7 @@ def configure_run_logger(prefix: str, timestamp: str) -> tuple[logging.Logger, P
         file_handler.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT))
         logger.addHandler(file_handler)
 
+    setattr(logger, "rapport_log_path", str(log_path))
+    setattr(logger, "rapport_timestamp", timestamp)
+
     return logger, log_path
